@@ -902,4 +902,59 @@ describe("StatusLineComponent display detector", () => {
 		expect(run).toHaveBeenCalledTimes(1);
 		component.dispose();
 	});
+
+	it("observes a nested git checkout created under a cached jj workspace", async () => {
+		const outer = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-outer-"));
+		const sub = path.join(outer, "sub");
+		fs.mkdirSync(sub, { recursive: true });
+		const heads = path.join(outer, ".jj", "repo", "op_heads", "heads");
+		fs.mkdirSync(heads, { recursive: true });
+		const previousDir = getProjectDir();
+		setProjectDir(sub);
+		try {
+			const jjBase = displayJj(outer, async () => "outer-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+			// displayJj hardcodes a fake watch target; point it at the real one.
+			const jjLive = { ...jjBase, watchTarget: () => heads } as unknown as VcsRepo;
+			const operationalJj = {
+				kind: () => "jj",
+				asGit: () => null,
+				asJj: () => null,
+				root: () => outer,
+				watchTarget: () => heads,
+				statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+			} as unknown as VcsRepo;
+			const nestedGit = operationalGit(sub, headFor("nested-branch"));
+			mockRepos(operationalJj, jjLive, sub);
+			const watchTargets: string[] = [];
+			vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+				watchTargets.push(repo.watchTarget());
+				return () => {};
+			}) as unknown as typeof vcs.watch);
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let nested = false;
+			vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (nested ? nestedGit : jjLive));
+
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => {});
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("outer-bookmark");
+
+			// A nested git checkout appears below the cached jj root: past
+			// the cadence it takes precedence for dirs inside it.
+			fs.mkdirSync(path.join(sub, ".git"), { recursive: true });
+			nested = true;
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("nested-branch");
+			expect(watchTargets).toContain(`${sub}/.git/HEAD`);
+			component.dispose();
+		} finally {
+			setProjectDir(previousDir);
+			fs.rmSync(outer, { recursive: true, force: true });
+		}
+	});
 });

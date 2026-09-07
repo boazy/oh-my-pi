@@ -308,6 +308,34 @@ function displayTargetAlive(repository: VcsRepo): boolean {
 }
 
 /**
+ * Whether a `.git` entry appeared on the path from `cwd` up to (excluding)
+ * `jjRoot` since discovery: a nested git checkout takes precedence for
+ * dirs inside it, so the display must re-resolve. Bounded to the nesting
+ * depth — no full repository walk. Anything unexpected means keep caching.
+ */
+function nestedGitAppeared(cwd: string, jjRoot: string): boolean {
+	try {
+		let dir = path.resolve(cwd);
+		const stop = path.resolve(jjRoot);
+		for (;;) {
+			if (dir === stop) return false;
+			if (!dir.startsWith(stop + path.sep)) return false;
+			try {
+				fs.statSync(path.join(dir, ".git"));
+				return true;
+			} catch {
+				// Absent at this level; keep climbing.
+			}
+			const parent = path.dirname(dir);
+			if (parent === dir) return false;
+			dir = parent;
+		}
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Whether a cached display handle is safe to keep without re-discovery.
  * Directory-backed primary jj workspaces stay cached while marker+target
  * exist; file-backed linked workspaces share their watch target with the
@@ -660,7 +688,12 @@ export class StatusLineComponent implements Component {
 			if (fresh) return cache.displayRepository;
 			// A live workspace needs no walk, but the timestamp must still
 			// advance — otherwise every render past the TTL stats again.
-			if (stable && keepCachedDisplay(cache.displayRepository)) {
+			if (
+				stable &&
+				!(cache.displayRepository.kind() === "jj" &&
+					nestedGitAppeared(cache.effectiveGitCwd, cache.displayRepository.root())) &&
+				keepCachedDisplay(cache.displayRepository)
+			) {
 				cache.displayRepositoryCheckedAt = now;
 				return cache.displayRepository;
 			}
