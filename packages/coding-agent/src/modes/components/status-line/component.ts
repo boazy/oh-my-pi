@@ -280,12 +280,15 @@ function displayWatchTarget(repository: VcsRepo | null): string | null {
 }
 
 /**
- * Whether the workspace behind a cached display handle still exists,
- * probed through its head watch target (one stat, no repository walk).
+ * Whether the workspace behind a cached display handle still exists: the
+ * local `.jj` marker must be present as well as the shared head watch
+ * target (two stats, no repository walk). Linked workspaces keep only an
+ * indirection locally while the shared target outlives them, so the target
+ * alone cannot prove the workspace is still there.
  */
-function displayWatchTargetAlive(repository: VcsRepo): boolean {
+function displayWorkspaceAlive(repository: VcsRepo): boolean {
 	try {
-		return fs.existsSync(repository.watchTarget());
+		return fs.existsSync(path.join(repository.root(), ".jj")) && fs.existsSync(repository.watchTarget());
 	} catch {
 		return false;
 	}
@@ -621,7 +624,7 @@ export class StatusLineComponent implements Component {
 			if (fresh) return cache.displayRepository;
 			// A live workspace needs no walk, but the timestamp must still
 			// advance — otherwise every render past the TTL stats again.
-			if (stable && displayWatchTargetAlive(cache.displayRepository)) {
+			if (stable && displayWorkspaceAlive(cache.displayRepository)) {
 				cache.displayRepositoryCheckedAt = now;
 				return cache.displayRepository;
 			}

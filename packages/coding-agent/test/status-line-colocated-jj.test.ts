@@ -553,4 +553,52 @@ describe("StatusLineComponent display detector", () => {
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`, `${root}/.git/HEAD`]);
 		component.dispose();
 	});
+
+	it("falls back when a linked workspace loses its local marker", async () => {
+		const shared = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-shared-"));
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-linked-"));
+		const heads = path.join(shared, "op_heads", "heads");
+		fs.mkdirSync(heads, { recursive: true });
+		// Linked-workspace layout: only an indirection locally, heads shared.
+		fs.writeFileSync(path.join(ws, ".jj"), `repo: ${path.join("..", "shared")}\n`);
+		try {
+			const operational = operationalGit(ws, headFor("main"));
+			const linked = {
+				kind: () => "jj",
+				asGit: () => null,
+				asJj: () => ({}) as never,
+				root: () => ws,
+				watchTarget: () => heads,
+				label: async () => "linked-bookmark",
+				statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+			} as unknown as VcsRepo;
+			const gitAgain = operationalGit(ws, headFor("main"));
+			mockRepos(operational, linked, ws);
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let displayCalls = 0;
+			vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (++displayCalls === 1 ? linked : gitAgain));
+
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => {});
+
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("linked-bookmark");
+
+			// The local marker goes away while the shared target survives:
+			// past the cadence the display still falls back to re-discovery.
+			fs.rmSync(path.join(ws, ".jj"), { force: true });
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("main");
+			expect(component.getTopBorder(80).content).not.toContain("linked-bookmark");
+			component.dispose();
+		} finally {
+			fs.rmSync(shared, { recursive: true, force: true });
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
 });
