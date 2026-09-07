@@ -666,11 +666,12 @@ export class StatusLineComponent implements Component {
 		cache.displayRepositoryCheckedAt = now;
 		if (cache.displayRepository && prevTarget !== displayWatchTarget(cache.displayRepository)) {
 			// The backend or head target changed (late colocation,
-			// late-appearing repo): rebuild both targets so jj-only changes
-			// invalidate from now on. Re-resolution itself is TTL-gated and
-			// the display poll covers branch reads, so a failed rebuild
-			// retries on the next change rather than storming.
+			// late-appearing repo, redirected `.git`): rebuild both targets
+			// so jj-only changes invalidate from now on, and drop the
+			// previous backend's cached branch/PR state — the new watcher
+			// only reports future moves, never the current one.
 			this.#setupGitWatcher();
+			this.invalidateGitCaches();
 		}
 		return cache.displayRepository;
 	}

@@ -604,4 +604,57 @@ describe("StatusLineComponent display detector", () => {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
 	});
+
+	it("drops the cached branch when the display target is redirected", async () => {
+		const root = "/repo/retarget";
+		const targetA = `${root}/.git/HEAD`;
+		const targetB = `${root}/.git/refs/heads/other`;
+		const gitA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("branch-a")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const gitB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("branch-b")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const operational = operationalGit(root, headFor("branch-a"));
+		mockRepos(operational, gitA, root);
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let moved = false;
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? gitB : gitA));
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("branch-a");
+
+		// The `.git` pointer moves with the cwd unchanged: the rebind
+		// installs the new target and the stale branch must not survive it,
+		// since a fresh watcher never reports the current state.
+		moved = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		const content = component.getTopBorder(80).content;
+		expect(content).toContain("branch-b");
+		expect(content).not.toContain("branch-a");
+		expect(watchTargets).toEqual([targetA, targetB, targetA]);
+		component.dispose();
+	});
 });
