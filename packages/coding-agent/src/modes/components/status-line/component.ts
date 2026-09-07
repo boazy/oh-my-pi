@@ -266,6 +266,19 @@ interface WorktreeContext {
 }
 
 /**
+ * Watch target identifying a display backend, or null when unreadable.
+ * Compared across revalidation so a backend *or* target change rebinds the
+ * watchers: same-kind/same-root handles can still move head targets.
+ */
+function displayWatchTarget(repository: VcsRepo | null): string | null {
+	try {
+		return repository?.watchTarget() ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Project + worktree-dir names when `cwd` is a linked git worktree, else null.
  * The project name comes from the shared primary checkout; bare-repo worktrees
  * resolve to the shared `foo.git` dir, so a trailing `.git` is stripped.
@@ -592,10 +605,7 @@ export class StatusLineComponent implements Component {
 		} else if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) {
 			return null;
 		}
-		const prevBackend =
-			cache.displayRepository !== null
-				? `${cache.displayRepository.kind()}:${cache.displayRepository.root()}`
-				: null;
+		const prevTarget = displayWatchTarget(cache.displayRepository);
 		let display: VcsRepo | null;
 		try {
 			display = vcs.repoForDisplay(cache.effectiveGitCwd);
@@ -605,11 +615,10 @@ export class StatusLineComponent implements Component {
 		cache.displayRepository = display ?? cache.repository;
 		cache.displayRepositoryCheckedAt = now;
 		if (cache.displayRepository && this.#gitUnwatch) {
-			const nextBackend = `${cache.displayRepository.kind()}:${cache.displayRepository.root()}`;
-			if (prevBackend !== nextBackend) {
-				// The backend changed under an installed watcher (late
-				// colocation): rebind both targets so jj-only changes
-				// invalidate from now on.
+			// The backend or head target changed under an installed watcher
+			// (late colocation): rebind both targets so jj-only changes
+			// invalidate from now on.
+			if (prevTarget !== displayWatchTarget(cache.displayRepository)) {
 				this.#setupGitWatcher();
 			}
 		}

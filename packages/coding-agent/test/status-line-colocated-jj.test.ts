@@ -321,6 +321,42 @@ describe("StatusLineComponent display detector", () => {
 		component.dispose();
 	});
 
+	it("rebinds watchers when the head target moves without a backend change", async () => {
+		const root = "/repo/target-move";
+		const operational = operationalGit(root, headFor("main"));
+		const before = operationalGit(root, headFor("main"));
+		const after = {
+			...operationalGit(root, headFor("main")),
+			watchTarget: () => `${root}/.git/refs/heads/main`,
+		} as unknown as VcsRepo;
+		mockRepos(operational, before, root);
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const movedAt = now + 6_000;
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (now >= movedAt ? after : before));
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("main");
+
+		// Same kind, same root, new head target: the watcher follows it.
+		now = movedAt;
+		component.getTopBorder(80);
+		await flush();
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.git/refs/heads/main`]);
+		expect(component.getTopBorder(80).content).toContain("main");
+		component.dispose();
+	});
+
 	it("polls the operational branch when its watcher fails to install", async () => {
 		const root = "/repo/watch-failure";
 		let current = headFor("branch-a");
