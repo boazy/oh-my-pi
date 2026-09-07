@@ -310,31 +310,20 @@ function displayTargetAlive(repository: VcsRepo): boolean {
 /**
  * Whether a git checkout rooted strictly below `jjRoot` now contains `cwd`:
  * nested checkouts take precedence for dirs inside them, so the display must
- * re-resolve. Each level reuses the central detector (marker validity matches
- * discovery exactly), bounded to the nesting depth. Root comparison is
- * lexical; symlinked layouts conservatively keep caching, as does anything
- * unexpected.
+ * re-resolve. One central discovery call from `cwd` (never per-level walks,
+ * which would repeat the upward search per directory), validated exactly
+ * like any other discovery. Root comparison is lexical; symlinked layouts
+ * conservatively keep caching, as does anything unexpected.
  */
 function nestedGitAppeared(cwd: string, jjRoot: string): boolean {
 	try {
-		let dir = path.resolve(cwd);
+		const dir = path.resolve(cwd);
 		const stop = path.resolve(jjRoot);
-		for (;;) {
-			if (dir === stop) return false;
-			if (!dir.startsWith(stop + path.sep)) return false;
-			// Reuse the central detector per level instead of stat-ing `.git`
-			// directly, so marker validity matches discovery exactly and the
-			// two cannot drift. Root comparison is lexical; symlinked layouts
-			// conservatively keep caching.
-			try {
-				if (vcs.git(dir)?.info().repoRoot === dir) return true;
-			} catch {
-				// Unreadable level; keep climbing.
-			}
-			const parent = path.dirname(dir);
-			if (parent === dir) return false;
-			dir = parent;
-		}
+		if (dir === stop || !dir.startsWith(stop + path.sep)) return false;
+		const found = vcs.git(dir);
+		if (!found) return false;
+		const foundRoot = path.resolve(found.info().repoRoot);
+		return foundRoot !== stop && foundRoot.startsWith(stop + path.sep);
 	} catch {
 		return false;
 	}

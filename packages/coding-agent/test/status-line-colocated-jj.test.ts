@@ -1162,4 +1162,53 @@ describe("StatusLineComponent display detector", () => {
 		expect(watchTargets).toEqual([jjHeads, targetA, jjHeads, targetB]);
 		component.dispose();
 	});
+
+	it("probes nested checkouts with one discovery call", async () => {
+		const outer = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-deep-"));
+		const cwd = path.join(outer, "a", "b", "c");
+		fs.mkdirSync(cwd, { recursive: true });
+		const heads = path.join(outer, ".jj", "repo", "op_heads", "heads");
+		fs.mkdirSync(heads, { recursive: true });
+		const previousDir = getProjectDir();
+		setProjectDir(cwd);
+		try {
+			const jjBase = displayJj(outer, async () => "deep-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+			const display = { ...jjBase, watchTarget: () => heads } as unknown as VcsRepo;
+			const operational = {
+				kind: () => "jj",
+				asGit: () => null,
+				asJj: () => null,
+				root: () => outer,
+				watchTarget: () => heads,
+				statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+			} as unknown as VcsRepo;
+			mockRepos(operational, display, cwd);
+			let gitCalls = 0;
+			vi.spyOn(vcs, "git").mockImplementation(() => {
+				gitCalls++;
+				return null;
+			});
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => {});
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("deep-bookmark");
+			const before = gitCalls;
+			// Past the cadence a four-level nesting costs one discovery
+			// call, not one per level.
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(gitCalls - before).toBeLessThanOrEqual(1);
+			expect(component.getTopBorder(80).content).toContain("deep-bookmark");
+			component.dispose();
+		} finally {
+			setProjectDir(previousDir);
+			fs.rmSync(outer, { recursive: true, force: true });
+		}
+	});
 });
