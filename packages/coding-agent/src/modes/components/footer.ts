@@ -27,6 +27,13 @@ export class FooterComponent implements Component {
 	// changes under it (late colocation), the watcher is rebound.
 	#watchedTarget: string | null = null;
 
+	// Fallback watcher for a retired jj display: while the cached branch
+	// comes from the operational git repo, this follows its HEAD so git
+	// moves invalidate the fallback. The display watcher above stays on
+	// the jj target, preserving repair detection through the label path.
+	#fallbackUnwatch: (() => void) | null = null;
+	#fallbackWatchedTarget: string | null = null;
+
 	// Last display-backend sync, bounding re-discovery walks past the
 	// initial setup.
 	#lastDisplayCheckAt = 0;
@@ -128,6 +135,7 @@ export class FooterComponent implements Component {
 			this.#gitUnwatch?.();
 			this.#gitUnwatch = unwatch;
 			this.#watchedTarget = target;
+			this.#releaseFallbackWatch();
 		} catch {
 			// Silently fail if we can't watch; the next TTL window retries.
 		}
@@ -143,6 +151,7 @@ export class FooterComponent implements Component {
 		this.#branchResolve = undefined;
 		this.#gitUnwatch?.();
 		this.#gitUnwatch = null;
+		this.#releaseFallbackWatch();
 	}
 
 	invalidate(): void {
@@ -156,22 +165,58 @@ export class FooterComponent implements Component {
 		this.#cachedBranch = undefined;
 	}
 	/**
-	 * Branch of the operational git checkout for a display whose jj label
-	 * failed to load. Only resolves in the colocated layout (same root):
-	 * pure-jj and nested layouts have no usable fallback and keep today's
-	 * null. Never throws.
+	 * Operational git fallback for a display whose jj label failed to load:
+	 * branch plus the repo to watch for HEAD moves. Only resolves in the
+	 * colocated layout (same root): pure-jj and nested layouts have no
+	 * usable fallback and keep today's null. Never throws.
 	 */
-	#operationalGitBranch(display: VcsRepo): string | null {
+	#gitFallback(display: VcsRepo): { branch: string | null; repo: VcsRepo | null } {
 		try {
 			const operational = vcs.repo(getProjectDir());
-			if (operational?.kind() !== "git" || operational.root() !== display.root()) return null;
-			const gitRepository = operational.asGit();
-			const headState = gitRepository?.headSync();
-			if (!headState) return null;
-			return headState.kind === "ref" ? (headState.branch ?? headState.refName ?? "HEAD") : "detached";
+			if (operational?.kind() !== "git" || operational.root() !== display.root()) {
+				return { branch: null, repo: null };
+			}
+			const headState = operational.asGit()?.headSync();
+			if (!headState) return { branch: null, repo: operational };
+			const branch = headState.kind === "ref" ? (headState.branch ?? headState.refName ?? "HEAD") : "detached";
+			return { branch, repo: operational };
 		} catch {
-			return null;
+			return { branch: null, repo: null };
 		}
+	}
+
+	/**
+	 * Follow the fallback repo's HEAD so a later `git switch` invalidates
+	 * the cached fallback branch. Target-keyed: reuses the live watcher
+	 * when the repo is unchanged, releases nothing on install failure.
+	 */
+	#watchFallback(repo: VcsRepo | null): void {
+		if (!repo) return;
+		let target: string | null = null;
+		try {
+			target = repo.watchTarget();
+		} catch {
+			target = null;
+		}
+		if (target === null || target === this.#fallbackWatchedTarget) return;
+		this.#releaseFallbackWatch();
+		try {
+			const unwatch = vcs.watch(repo, () => {
+				this.#invalidateBranch();
+				this.#onBranchChange?.();
+			});
+			this.#fallbackUnwatch = unwatch;
+			this.#fallbackWatchedTarget = target;
+		} catch {
+			// Silently fail if we can't watch; the cached fallback stays
+			// until the next invalidation from elsewhere.
+		}
+	}
+
+	#releaseFallbackWatch(): void {
+		this.#fallbackUnwatch?.();
+		this.#fallbackUnwatch = null;
+		this.#fallbackWatchedTarget = null;
 	}
 
 	/**
@@ -204,6 +249,7 @@ export class FooterComponent implements Component {
 					.label(request.signal)
 					.then(label => {
 						if (this.#disposed || this.#branchGeneration !== generation) return;
+						this.#releaseFallbackWatch();
 						const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
 						const changed = this.#cachedBranch !== clean;
 						this.#cachedBranch = clean;
@@ -211,7 +257,11 @@ export class FooterComponent implements Component {
 					})
 					.catch(() => {
 						if (this.#disposed || this.#branchGeneration !== generation) return;
-						this.#cachedBranch = this.#operationalGitBranch(repository);
+						const fallback = this.#gitFallback(repository);
+						const changed = this.#cachedBranch !== fallback.branch;
+						this.#cachedBranch = fallback.branch;
+						this.#watchFallback(fallback.repo);
+						if (changed) this.#onBranchChange?.();
 					})
 					.finally(() => {
 						if (this.#branchResolve === request) this.#branchResolve = undefined;

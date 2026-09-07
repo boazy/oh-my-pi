@@ -101,8 +101,16 @@ describe("FooterComponent jj label fallback", () => {
 		vi.spyOn(vcs, "watch").mockImplementation((() => () => {}) as unknown as typeof vcs.watch);
 
 		const component = new FooterComponent(makeSession());
-		component.watchBranch(() => {});
+		const onBranchChange = vi.fn();
+		component.watchBranch(onBranchChange);
 		try {
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			expect(label).toHaveBeenCalledTimes(1);
+			// The fallback is a real change (undefined -> branch): it must
+			// repaint, or an idle footer keeps the old/empty frame.
+			expect(onBranchChange).toHaveBeenCalledTimes(1);
 			component.render(80);
 			await flush();
 			expect(component.render(80).join("\n")).toContain("(feature/f)");
@@ -130,6 +138,45 @@ describe("FooterComponent jj label fallback", () => {
 			component.render(80);
 			await flush();
 			expect(component.render(80).join("\n")).not.toContain("feature/f");
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("follows git HEAD moves while jj stays broken", async () => {
+		const root = "/repo/footer-fallback-watch";
+		const label = vi.fn<() => Promise<string | null>>().mockRejectedValue(new Error("store gone"));
+		let gitBranch = "feature/f";
+		const git = gitRepo(root, "feature/f");
+		const gitHandle = git.asGit();
+		if (gitHandle) gitHandle.headSync = () => ({ kind: "ref", branch: gitBranch, refName: `refs/heads/${gitBranch}`, commit: undefined });
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
+		vi.spyOn(vcs, "repo").mockReturnValue(git);
+		const watchers: { kind: string; fire: () => void }[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(
+			((repo: VcsRepo, fire: () => void) => {
+				watchers.push({ kind: repo.kind(), fire });
+				return () => {};
+			}) as unknown as typeof vcs.watch,
+		);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		try {
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			// Both backends watched: git for the fallback, jj so a repair
+			// still invalidates through the label path.
+			expect(watchers.map(watcher => watcher.kind).sort()).toEqual(["git", "jj"]);
+
+			// A later `git switch` invalidates the cached fallback even
+			// though the jj target never changed.
+			gitBranch = "feature/g2";
+			watchers.find(watcher => watcher.kind === "git")?.fire();
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/g2)");
 		} finally {
 			component.dispose();
 		}

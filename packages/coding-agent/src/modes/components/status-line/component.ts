@@ -1332,6 +1332,7 @@ export class StatusLineComponent implements Component {
 			const generation = this.#jjCacheGeneration;
 			(async () => {
 				let next: string | null = null;
+				let loaded = false;
 				try {
 					const raw =
 						(await repository.label(withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal))) ?? null;
@@ -1339,10 +1340,7 @@ export class StatusLineComponent implements Component {
 					// characters; sanitize at the cache boundary (the git segment
 					// renders the label verbatim).
 					next = raw === null ? null : sanitizeStatusText(raw);
-					// A successful load clears the failure marker: the handle
-					// is usable again (repaired workspace), so presentation
-					// returns to jj on the repaint below.
-					if (displayWatchTarget(repository) === this.#jjLabelFailedTarget) this.#jjLabelFailedTarget = null;
+					loaded = true;
 				} catch (error) {
 					next = null;
 					this.#jjLabelLoadFailed(activeRepoCache, repository, generation, error);
@@ -1351,6 +1349,11 @@ export class StatusLineComponent implements Component {
 					if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
 				}
 				if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+				// A successful load clears the failure marker only when this
+				// request is still current: a superseded resolve must neither
+				// publish its label (below) nor clear a failure the newer
+				// generation recorded for the same target.
+				if (loaded && displayWatchTarget(repository) === this.#jjLabelFailedTarget) this.#jjLabelFailedTarget = null;
 				const changed = next !== this.#cachedJjBranch;
 				this.#cachedJjBranch = next;
 				if (changed) this.#onBranchChange?.();
