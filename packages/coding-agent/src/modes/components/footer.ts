@@ -155,6 +155,24 @@ export class FooterComponent implements Component {
 		this.#branchResolve = undefined;
 		this.#cachedBranch = undefined;
 	}
+	/**
+	 * Branch of the operational git checkout for a display whose jj label
+	 * failed to load. Only resolves in the colocated layout (same root):
+	 * pure-jj and nested layouts have no usable fallback and keep today's
+	 * null. Never throws.
+	 */
+	#operationalGitBranch(display: VcsRepo): string | null {
+		try {
+			const operational = vcs.repo(getProjectDir());
+			if (operational?.kind() !== "git" || operational.root() !== display.root()) return null;
+			const gitRepository = operational.asGit();
+			const headState = gitRepository?.headSync();
+			if (!headState) return null;
+			return headState.kind === "ref" ? (headState.branch ?? headState.refName ?? "HEAD") : "detached";
+		} catch {
+			return null;
+		}
+	}
 
 	/**
 	 * Get the current branch, bookmark, or change-id label.
@@ -193,7 +211,7 @@ export class FooterComponent implements Component {
 					})
 					.catch(() => {
 						if (this.#disposed || this.#branchGeneration !== generation) return;
-						this.#cachedBranch = null;
+						this.#cachedBranch = this.#operationalGitBranch(repository);
 					})
 					.finally(() => {
 						if (this.#branchResolve === request) this.#branchResolve = undefined;

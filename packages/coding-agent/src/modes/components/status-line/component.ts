@@ -550,6 +550,14 @@ export class StatusLineComponent implements Component {
 	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
+	// Watch target of a jj display handle whose label load genuinely rejected,
+	// with the rejection timestamp. While set, presentation serves the
+	// colocated operational git branch instead of a permanently-null jj
+	// label, re-probing jj at the refresh cadence so a repaired workspace
+	// recovers without a restart. Only set for real backend rejections —
+	// never aborts/timeouts, never healthy nulls.
+	#jjLabelFailedTarget: string | null = null;
+	#jjLabelFailedAt = 0;
 	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
 	// bookmark move (#invalidateGitCaches). An in-flight jj query captures this
 	// at launch; a mismatch on resolve means the caches were reset underneath it
@@ -698,8 +706,10 @@ export class StatusLineComponent implements Component {
 			}
 			if (
 				stable &&
-				!(cache.displayRepository.kind() === "jj" &&
-					nestedGitAppeared(cache.effectiveGitCwd, cache.displayRepository.root())) &&
+				!(
+					cache.displayRepository.kind() === "jj" &&
+					nestedGitAppeared(cache.effectiveGitCwd, cache.displayRepository.root())
+				) &&
 				keepCachedDisplay(cache.displayRepository)
 			) {
 				cache.displayRepositoryCheckedAt = now;
@@ -1254,6 +1264,48 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusActive?.controller.abort();
 		this.#jjStatusActive = undefined;
 	}
+	/**
+	 * Record a genuine jj label load rejection for a colocated display so
+	 * presentation serves the operational git branch until jj loads again.
+	 * Only genuine backend rejections retire the handle: deliberate aborts
+	 * (reset/dispose) and command timeouts are transient, and a healthy
+	 * null (no bookmark) must keep showing jj-empty, never git.
+	 */
+	#jjLabelLoadFailed(activeRepoCache: ActiveRepoCache, repository: VcsRepo, generation: number, error: unknown): void {
+		if (this.#disposed || this.#jjCacheGeneration !== generation) return;
+		const name = (error as { name?: unknown } | null)?.name;
+		if (name === "AbortError" || name === "TimeoutError") return;
+		const target = displayWatchTarget(repository);
+		if (target === null || !this.#colocatedGitRepo(activeRepoCache, repository)) return;
+		if (this.#jjLabelFailedTarget === target) {
+			this.#jjLabelFailedAt = Date.now();
+			return;
+		}
+		this.#jjLabelFailedTarget = target;
+		this.#jjLabelFailedAt = Date.now();
+		this.#onBranchChange?.();
+	}
+
+	/**
+	 * Operational git handle when `display` is a jj workspace colocated on
+	 * the same root (mirrors the status path's colocation rule), else null.
+	 * Pure-jj and nested layouts have no usable fallback and keep today's
+	 * null behavior.
+	 */
+	#colocatedGitRepo(activeRepoCache: ActiveRepoCache, display: VcsRepo): VcsRepo | null {
+		const operational = this.#resolveRepository(activeRepoCache);
+		return operational?.kind() === "git" && operational.root() === display.root() ? operational : null;
+	}
+
+	/**
+	 * Operational git branch for a retired jj display. Served from the
+	 * separate branch-cache slot (keyed by the git watch target), so jj and
+	 * git labels never clobber each other.
+	 */
+	#colocatedGitBranch(activeRepoCache: ActiveRepoCache, display: VcsRepo): string | null {
+		const gitRepo = this.#colocatedGitRepo(activeRepoCache, display);
+		return gitRepo ? this.#getBranchLabel(activeRepoCache, gitRepo) : this.#cachedJjBranch;
+	}
 	#getBranchLabel(
 		activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache(),
 		// Presentation defaults to the display detector; PR lookup passes the
@@ -1266,8 +1318,11 @@ export class StatusLineComponent implements Component {
 		if (!repository) return null;
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
-			if (this.#jjBranchActive || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
-				return this.#cachedJjBranch;
+			const labelTarget = displayWatchTarget(repository);
+			const labelFailed = labelTarget !== null && labelTarget === this.#jjLabelFailedTarget;
+			const labelProbeDue = labelFailed && Date.now() - this.#jjLabelFailedAt >= JJ_REFRESH_TTL_MS;
+			if (this.#jjBranchActive || (!labelProbeDue && Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS)) {
+				return labelFailed ? this.#colocatedGitBranch(activeRepoCache, repository) : this.#cachedJjBranch;
 			}
 			const request: JjResolveRequest = {
 				id: ++this.#jjResolveSeq,
@@ -1284,8 +1339,13 @@ export class StatusLineComponent implements Component {
 					// characters; sanitize at the cache boundary (the git segment
 					// renders the label verbatim).
 					next = raw === null ? null : sanitizeStatusText(raw);
-				} catch {
+					// A successful load clears the failure marker: the handle
+					// is usable again (repaired workspace), so presentation
+					// returns to jj on the repaint below.
+					if (displayWatchTarget(repository) === this.#jjLabelFailedTarget) this.#jjLabelFailedTarget = null;
+				} catch (error) {
 					next = null;
+					this.#jjLabelLoadFailed(activeRepoCache, repository, generation, error);
 				} finally {
 					if (this.#jjBranchActive?.id === request.id) this.#jjBranchActive = undefined;
 					if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
@@ -1295,7 +1355,7 @@ export class StatusLineComponent implements Component {
 				this.#cachedJjBranch = next;
 				if (changed) this.#onBranchChange?.();
 			})();
-			return this.#cachedJjBranch;
+			return labelFailed ? this.#colocatedGitBranch(activeRepoCache, repository) : this.#cachedJjBranch;
 		}
 		// The branch cache is keyed by watch target as well as cwd: display
 		// and operational reads can resolve different repos for one cwd
@@ -1405,7 +1465,13 @@ export class StatusLineComponent implements Component {
 			const generation = this.#defaultBranchGeneration;
 			(async () => {
 				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
-				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd || this.#defaultBranchRepoId !== lookupRepoId || this.#defaultBranchGeneration !== generation) return;
+				if (
+					this.#disposed ||
+					this.#defaultBranchCwd !== lookupCwd ||
+					this.#defaultBranchRepoId !== lookupRepoId ||
+					this.#defaultBranchGeneration !== generation
+				)
+					return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
 					if (this.#onBranchChange) {
@@ -1422,7 +1488,6 @@ export class StatusLineComponent implements Component {
 		unstaged: number;
 		untracked: number;
 	} | null {
-
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
@@ -1524,7 +1589,11 @@ export class StatusLineComponent implements Component {
 		}
 
 		// Don't look up if detached, default branch, or already in flight.
-		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd, displayWatchTarget(operational)) || this.#prLookupInFlight) {
+		if (
+			branch === "detached" ||
+			this.#isDefaultBranch(branch, gitCwd, displayWatchTarget(operational)) ||
+			this.#prLookupInFlight
+		) {
 			return stalePr ?? null;
 		}
 
