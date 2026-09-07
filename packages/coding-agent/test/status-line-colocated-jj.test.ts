@@ -554,13 +554,16 @@ describe("StatusLineComponent display detector", () => {
 		component.dispose();
 	});
 
-	it("falls back when a linked workspace loses its local marker", async () => {
-		const shared = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-shared-"));
+	it("falls back when a linked workspace marker is redirected", async () => {
+		const primary = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-primary-"));
 		const ws = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-linked-"));
-		const heads = path.join(shared, "op_heads", "heads");
+		const repoDir = path.join(primary, ".jj", "repo");
+		const heads = path.join(repoDir, "op_heads", "heads");
 		fs.mkdirSync(heads, { recursive: true });
-		// Linked-workspace layout: only an indirection locally, heads shared.
-		fs.writeFileSync(path.join(ws, ".jj"), `repo: ${path.join("..", "shared")}\n`);
+		// Real secondary layout: `.jj/repo` is a file pointing at the shared
+		// repo dir, while the watch target lives in that shared repo.
+		fs.mkdirSync(path.join(ws, ".jj"), { recursive: true });
+		fs.writeFileSync(path.join(ws, ".jj", "repo"), `${path.relative(path.join(ws, ".jj"), repoDir)}\n`);
 		try {
 			const operational = operationalGit(ws, headFor("main"));
 			const linked = {
@@ -587,9 +590,9 @@ describe("StatusLineComponent display detector", () => {
 			await flush();
 			expect(component.getTopBorder(80).content).toContain("linked-bookmark");
 
-			// The local marker goes away while the shared target survives:
-			// past the cadence the display still falls back to re-discovery.
-			fs.rmSync(path.join(ws, ".jj"), { force: true });
+			// Redirect the marker while the shared target survives: a bare
+			// target check would keep the stale handle forever.
+			fs.writeFileSync(path.join(ws, ".jj", "repo"), "/nonexistent/elsewhere\n");
 			now += 6_000;
 			component.getTopBorder(80);
 			await flush();
@@ -597,7 +600,7 @@ describe("StatusLineComponent display detector", () => {
 			expect(component.getTopBorder(80).content).not.toContain("linked-bookmark");
 			component.dispose();
 		} finally {
-			fs.rmSync(shared, { recursive: true, force: true });
+			fs.rmSync(primary, { recursive: true, force: true });
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
 	});

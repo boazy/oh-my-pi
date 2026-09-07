@@ -280,18 +280,42 @@ function displayWatchTarget(repository: VcsRepo | null): string | null {
 }
 
 /**
- * Whether the workspace behind a cached display handle still exists: the
- * local `.jj` marker must be present as well as the shared head watch
- * target (two stats, no repository walk). Linked workspaces keep only an
- * indirection locally while the shared target outlives them, so the target
- * alone cannot prove the workspace is still there.
+ * Local `.jj/repo` marker state, mirroring `pi-vcs` workspace discovery:
+ * a directory in the default workspace, or a file (created by
+ * `jj workspace add`) pointing at the shared repo.
  */
-function displayWorkspaceAlive(repository: VcsRepo): boolean {
+function jjMarkerState(root: string): "primary" | "linked" | "gone" {
 	try {
-		return fs.existsSync(path.join(repository.root(), ".jj")) && fs.existsSync(repository.watchTarget());
+		const marker = fs.statSync(path.join(root, ".jj", "repo"));
+		if (marker.isDirectory()) return "primary";
+		return marker.isFile() ? "linked" : "gone";
+	} catch {
+		return "gone";
+	}
+}
+
+/**
+ * Whether the shared head watch target of a cached display handle still exists.
+ */
+function displayTargetAlive(repository: VcsRepo): boolean {
+	try {
+		return fs.existsSync(repository.watchTarget());
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Whether a cached display handle is safe to keep without re-discovery.
+ * Directory-backed primary jj workspaces stay cached while marker+target
+ * exist; file-backed linked workspaces share their watch target with the
+ * primary, so they re-resolve every window. (Git/git pairs never reach
+ * here: colocation can appear mid-session.)
+ */
+function keepCachedDisplay(repository: VcsRepo): boolean {
+	if (repository.kind() !== "jj") return true;
+	if (jjMarkerState(repository.root()) !== "primary") return false;
+	return displayTargetAlive(repository);
 }
 /**
  * Project + worktree-dir names when `cwd` is a linked git worktree, else null.
@@ -624,7 +648,7 @@ export class StatusLineComponent implements Component {
 			if (fresh) return cache.displayRepository;
 			// A live workspace needs no walk, but the timestamp must still
 			// advance — otherwise every render past the TTL stats again.
-			if (stable && displayWorkspaceAlive(cache.displayRepository)) {
+			if (stable && keepCachedDisplay(cache.displayRepository)) {
 				cache.displayRepositoryCheckedAt = now;
 				return cache.displayRepository;
 			}
