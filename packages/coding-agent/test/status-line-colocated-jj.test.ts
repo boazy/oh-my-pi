@@ -300,4 +300,44 @@ describe("StatusLineComponent display detector", () => {
 		expect(component.getTopBorder(80).content).toContain("late-bookmark");
 		component.dispose();
 	});
+
+	it("polls the operational branch when its watcher fails to install", async () => {
+		const root = "/repo/watch-failure";
+		let current = headFor("branch-a");
+		const liveHandle = { ...gitHandle(headFor("branch-a")), headSync: () => current };
+		const operational = {
+			...operationalGit(root, headFor("branch-a")),
+			asGit: () => liveHandle,
+		} as unknown as VcsRepo;
+		const display = displayJj(root, async () => "feature-x", { staged: 0, unstaged: 0, untracked: 0 });
+		mockRepos(operational, display, root);
+		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		// The display watcher installs; the operational one throws.
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			if (repo.kind() === "git") throw new Error("no watcher");
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+
+		// A git switch moves .git/HEAD with no watcher to fire it; past the
+		// poll cadence the lookup follows the new branch instead of the cache.
+		current = headFor("branch-b");
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(2);
+		component.dispose();
+	});
 });

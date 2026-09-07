@@ -857,8 +857,10 @@ export class StatusLineComponent implements Component {
 					});
 					this.#operationalGitUnwatch = unwatchOperational;
 				} catch {
-					// Display-watcher coverage remains; PR state then refreshes
-					// on the next poll/cwd change instead.
+					// Fall back to polling for the operational branch: without
+					// this, the cached git branch would stay stale indefinitely
+					// while the display watcher reports healthy.
+					this.#gitWatcherUnavailable = true;
 				}
 			}
 		}

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- In colocated jj-git workspaces, the status line and legacy footer now show the Jujutsu bookmark/change label and working-copy status instead of a detached git HEAD. Git-backed automation still resolves these directories to Git ([#11071](https://github.com/can1357/oh-my-pi/issues/11071)).
+- In colocated jj-git workspaces, the status line and legacy footer now show the Jujutsu bookmark/change label and working-copy status instead of a detached git HEAD. Git-backed automation still resolves these directories to Git ([#11071](https://github.com/can1357/oh-my-pi/issues/11071), [#11113](https://github.com/can1357/oh-my-pi/pull/11113) by [@boazy](https://github.com/boazy)).
 
 ## [18.1.12] - 2026-09-06
 
