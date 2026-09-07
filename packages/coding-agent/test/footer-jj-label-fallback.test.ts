@@ -273,9 +273,19 @@ describe("FooterComponent jj label fallback", () => {
 	});
 	it("keeps null on native cancellation instead of failing over", async () => {
 		const root = "/repo/footer-fallback-transient";
-		const label = vi
-			.fn<() => Promise<string | null>>()
-			.mockRejectedValue(Object.assign(new Error("operation canceled"), { name: "VcsError", code: "Canceled" }));
+		// Real transient path: a native handle failing its pre-start
+		// heartbeat for an aborted signal (no repo I/O runs). Deterministic:
+		// CancelToken honors already-fired signals, so no worker race.
+		const nativeRepo = vcs.repo(import.meta.dir);
+		if (!nativeRepo) throw new Error("expected a git checkout above the test dir");
+		const stop = new AbortController();
+		stop.abort();
+		const pending: Promise<string | null>[] = [];
+		const label = vi.fn<() => Promise<string | null>>(() => {
+			const promise = nativeRepo.label(stop.signal).then(label => label ?? null);
+			pending.push(promise);
+			return promise;
+		});
 		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
 		vi.spyOn(vcs, "repo").mockReturnValue(gitRepo(root, "feature/f"));
 		const watchKinds: string[] = [];
@@ -283,16 +293,79 @@ describe("FooterComponent jj label fallback", () => {
 			watchKinds.push(repo.kind());
 			return () => {};
 		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		async function settleNative(): Promise<void> {
+			await Promise.allSettled(pending);
+			pending.length = 0;
+			await flush();
+		}
 
 		const component = new FooterComponent(makeSession());
 		component.watchBranch(() => {});
 		try {
 			component.render(80);
-			await flush();
+			await settleNative();
 			// A mere timeout must not fail over to git: sticky null, and
 			// no fallback watcher installed.
 			expect(component.render(80).join("\n")).not.toContain("(feature/f)");
 			expect(watchKinds).toEqual(["jj"]);
+
+			// Past the cadence the footer still holds its sticky null: no
+			// retry storm, no wedged slot, still no failover.
+			now += 6_000;
+			component.render(80);
+			await settleNative();
+			expect(label.mock.calls.length).toBe(1);
+			expect(component.render(80).join("\n")).not.toContain("(feature/f)");
+		} finally {
+			component.dispose();
+		}
+	});
+	it("preserves the fallback across a transient retry", async () => {
+		const root = "/repo/footer-fallback-transient-retry";
+		// Real transient path (as above): pre-aborted heartbeat rejection.
+		const nativeRepo = vcs.repo(import.meta.dir);
+		if (!nativeRepo) throw new Error("expected a git checkout above the test dir");
+		const stop = new AbortController();
+		stop.abort();
+		const pending: Promise<string | null>[] = [];
+		const label = vi.fn<() => Promise<string | null>>().mockRejectedValue(new Error("store gone"));
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
+		vi.spyOn(vcs, "repo").mockReturnValue(gitRepo(root, "feature/f"));
+		vi.spyOn(vcs, "watch").mockImplementation((() => () => {}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		async function settleNative(): Promise<void> {
+			await Promise.allSettled(pending);
+			pending.length = 0;
+			await flush();
+		}
+
+		const component = new FooterComponent(makeSession());
+		const onBranchChange = vi.fn();
+		component.watchBranch(onBranchChange);
+		try {
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			onBranchChange.mockClear();
+
+			// A TTL re-probe that cancels must leave the installed
+			// fallback (and its frame) untouched, without repainting.
+			label.mockImplementation(() => {
+				const promise = nativeRepo.label(stop.signal).then(label => label ?? null);
+				pending.push(promise);
+				return promise;
+			});
+			const callsBefore = label.mock.calls.length;
+			now += 6_000;
+			component.render(80);
+			await settleNative();
+			// The re-probe really ran (not a vacuous pass on a stuck cache).
+			expect(label.mock.calls.length).toBeGreaterThan(callsBefore);
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			expect(onBranchChange).not.toHaveBeenCalled();
 		} finally {
 			component.dispose();
 		}

@@ -263,10 +263,11 @@ export class FooterComponent implements Component {
 			})
 			.catch((error: unknown) => {
 				if (this.#disposed || this.#branchGeneration !== generation) return;
-				// Transient cancellations keep today's sticky null rather
-				// than failing over: the store may merely be slow.
+				// Transient retries must not clobber an installed fallback
+				// with null (and seed sticky null only initially): either
+				// way the visible frame is unchanged, so no repaint.
 				if (isTransientVcsError(error)) {
-					this.#cachedBranch = null;
+					if (!this.#fallbackRepo) this.#cachedBranch = null;
 					return;
 				}
 				const fallback = this.#gitFallback(repository);

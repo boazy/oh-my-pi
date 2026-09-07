@@ -91,9 +91,20 @@ impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
+		let aborted = signal
+			.as_ref()
+			.and_then(|value| value.coerce_to_object().ok())
+			.and_then(|object| object.get_named_property::<bool>("aborted").ok())
+			.unwrap_or(false);
 		if let Some(signal) = signal.and_then(|value| AbortSignal::from_unknown(value).ok()) {
 			let abort_token = result.emplace_abort_token();
-			signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+			// An already-fired signal never invokes on_abort again: honor its
+			// current state, or pre-cancelled work would run to completion.
+			if aborted {
+				abort_token.abort(AbortReason::Signal);
+			} else {
+				signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+			}
 		}
 		result
 	}

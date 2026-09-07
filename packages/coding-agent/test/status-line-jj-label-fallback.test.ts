@@ -86,6 +86,7 @@ async function flush(): Promise<void> {
 	await Promise.resolve();
 }
 
+
 function mockBackends(label: () => Promise<string | null>) {
 	const gitHandle = {
 		defaultBranch: async () => "main",
@@ -178,27 +179,42 @@ describe("StatusLineComponent jj label fallback", () => {
 	});
 
 	it("does not retire the handle on native cancellation", async () => {
-		// The binding's actual timeout shape: repo_blocking rejects with
-		// { name: "VcsError", code: "Canceled" } when the signal fires
-		// before the native task begins — not a DOM TimeoutError.
-		const label = vi
-			.fn<() => Promise<string | null>>()
-			.mockRejectedValue(Object.assign(new Error("operation canceled"), { name: "VcsError", code: "Canceled" }));
+		// Real failure path: a native handle failing its pre-start heartbeat
+		// for an aborted signal (no repo I/O runs) rejects with the binding's
+		// VcsError/code Canceled shape. Deterministic: CancelToken honors
+		// already-fired signals, so no worker race is involved.
+		const nativeRepo = vcs.repo(import.meta.dir);
+		if (!nativeRepo) throw new Error("expected a git checkout above the test dir");
+		const stop = new AbortController();
+		stop.abort();
+		const pending: Promise<string | null>[] = [];
+		const label = vi.fn<() => Promise<string | null>>(() => {
+			const promise = nativeRepo.label(stop.signal).then(label => label ?? null);
+			pending.push(promise);
+			return promise;
+		});
 		mockBackends(label);
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
+		// Await the native settlement itself (event loop), then drain the
+		// component continuations — no wall-clock guessing.
+		async function settleNative(): Promise<void> {
+			await Promise.allSettled(pending);
+			pending.length = 0;
+			await flush();
+		}
 
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSettings);
 		try {
 			component.getTopBorder(80);
-			await flush();
+			await settleNative();
 			// Transient timeout: keep the (empty) jj presentation and retry
 			// on cadence rather than failing over to git.
 			expect(component.getTopBorder(80).content).not.toContain("feature/g");
 			now += 6_000;
 			component.getTopBorder(80);
-			await flush();
+			await settleNative();
 			expect(label.mock.calls.length).toBeGreaterThanOrEqual(2);
 			expect(component.getTopBorder(80).content).not.toContain("feature/g");
 		} finally {
