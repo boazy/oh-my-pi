@@ -149,16 +149,20 @@ describe("FooterComponent jj label fallback", () => {
 		let gitBranch = "feature/f";
 		const git = gitRepo(root, "feature/f");
 		const gitHandle = git.asGit();
-		if (gitHandle) gitHandle.headSync = () => ({ kind: "ref", branch: gitBranch, refName: `refs/heads/${gitBranch}`, commit: undefined });
+		if (gitHandle)
+			gitHandle.headSync = () => ({
+				kind: "ref",
+				branch: gitBranch,
+				refName: `refs/heads/${gitBranch}`,
+				commit: undefined,
+			});
 		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
 		vi.spyOn(vcs, "repo").mockReturnValue(git);
 		const watchers: { kind: string; fire: () => void }[] = [];
-		vi.spyOn(vcs, "watch").mockImplementation(
-			((repo: VcsRepo, fire: () => void) => {
-				watchers.push({ kind: repo.kind(), fire });
-				return () => {};
-			}) as unknown as typeof vcs.watch,
-		);
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo, fire: () => void) => {
+			watchers.push({ kind: repo.kind(), fire });
+			return () => {};
+		}) as unknown as typeof vcs.watch);
 
 		const component = new FooterComponent(makeSession());
 		component.watchBranch(() => {});
@@ -177,6 +181,49 @@ describe("FooterComponent jj label fallback", () => {
 			component.render(80);
 			await flush();
 			expect(component.render(80).join("\n")).toContain("(feature/g2)");
+		} finally {
+			component.dispose();
+		}
+	});
+	it("re-probes jj on a bounded cadence while the fallback holds", async () => {
+		const root = "/repo/footer-fallback-reprobe";
+		const label = vi.fn<() => Promise<string | null>>().mockRejectedValue(new Error("store gone"));
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
+		vi.spyOn(vcs, "repo").mockReturnValue(gitRepo(root, "feature/f"));
+		vi.spyOn(vcs, "watch").mockImplementation((() => () => {}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		try {
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			expect(label).toHaveBeenCalledTimes(1);
+
+			// Within the cadence nothing re-issues: no per-render storm.
+			now += 1_000;
+			component.render(80);
+			await flush();
+			expect(label).toHaveBeenCalledTimes(1);
+
+			// Past the cadence exactly one re-probe runs. A still-broken
+			// store fails silently back into the same fallback.
+			now += 5_000;
+			component.render(80);
+			await flush();
+			expect(label).toHaveBeenCalledTimes(2);
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+
+			// A repaired store recovers without a restart.
+			label.mockResolvedValue("fixed-j");
+			now += 5_000;
+			component.render(80);
+			await flush();
+			const content = component.render(80).join("\n");
+			expect(content).toContain("(fixed-j)");
+			expect(content).not.toContain("(feature/f)");
 		} finally {
 			component.dispose();
 		}

@@ -124,7 +124,14 @@ export class FooterComponent implements Component {
 		} catch {
 			return;
 		}
-		if (target === this.#watchedTarget && this.#gitUnwatch) return;
+		if (target === this.#watchedTarget && this.#gitUnwatch) {
+			// A cached fallback never re-issues the label on its own, so a
+			// repaired store would stick on git forever: re-probe jj here,
+			// bounded by this TTL plus the in-flight guard. A still-broken
+			// store fails silently back into the same fallback.
+			if (this.#fallbackWatchedTarget !== null && !repository.asGit()) this.#requestJjLabel(repository);
+			return;
+		}
 		// Install before disposing: a failed replacement keeps existing
 		// coverage instead of leaving none.
 		try {
@@ -220,6 +227,38 @@ export class FooterComponent implements Component {
 	}
 
 	/**
+	 * Issue one async jj label load, dropping superseded completions by
+	 * launch generation. Shared by the cache-miss path and the fallback
+	 * re-probe; never issues while another load is in flight.
+	 */
+	#requestJjLabel(repository: VcsRepo): void {
+		if (this.#branchResolve) return;
+		const request = new AbortController();
+		const generation = this.#branchGeneration;
+		this.#branchResolve = request;
+		void repository
+			.label(request.signal)
+			.then(label => {
+				if (this.#disposed || this.#branchGeneration !== generation) return;
+				this.#releaseFallbackWatch();
+				const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
+				const changed = this.#cachedBranch !== clean;
+				this.#cachedBranch = clean;
+				if (changed) this.#onBranchChange?.();
+			})
+			.catch(() => {
+				if (this.#disposed || this.#branchGeneration !== generation) return;
+				const fallback = this.#gitFallback(repository);
+				const changed = this.#cachedBranch !== fallback.branch;
+				this.#cachedBranch = fallback.branch;
+				this.#watchFallback(fallback.repo);
+				if (changed) this.#onBranchChange?.();
+			})
+			.finally(() => {
+				if (this.#branchResolve === request) this.#branchResolve = undefined;
+			});
+	}
+	/**
 	 * Get the current branch, bookmark, or change-id label.
 	 */
 	#getCurrentBranch(): string | null {
@@ -242,30 +281,7 @@ export class FooterComponent implements Component {
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
 			if (!this.#branchResolve) {
-				const request = new AbortController();
-				const generation = this.#branchGeneration;
-				this.#branchResolve = request;
-				void repository
-					.label(request.signal)
-					.then(label => {
-						if (this.#disposed || this.#branchGeneration !== generation) return;
-						this.#releaseFallbackWatch();
-						const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
-						const changed = this.#cachedBranch !== clean;
-						this.#cachedBranch = clean;
-						if (changed) this.#onBranchChange?.();
-					})
-					.catch(() => {
-						if (this.#disposed || this.#branchGeneration !== generation) return;
-						const fallback = this.#gitFallback(repository);
-						const changed = this.#cachedBranch !== fallback.branch;
-						this.#cachedBranch = fallback.branch;
-						this.#watchFallback(fallback.repo);
-						if (changed) this.#onBranchChange?.();
-					})
-					.finally(() => {
-						if (this.#branchResolve === request) this.#branchResolve = undefined;
-					});
+				this.#requestJjLabel(repository);
 			}
 			return this.#cachedBranch ?? null;
 		}

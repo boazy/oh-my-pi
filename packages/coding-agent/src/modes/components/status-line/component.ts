@@ -1353,7 +1353,13 @@ export class StatusLineComponent implements Component {
 				// request is still current: a superseded resolve must neither
 				// publish its label (below) nor clear a failure the newer
 				// generation recorded for the same target.
-				if (loaded && displayWatchTarget(repository) === this.#jjLabelFailedTarget) this.#jjLabelFailedTarget = null;
+				if (loaded && displayWatchTarget(repository) === this.#jjLabelFailedTarget) {
+					this.#jjLabelFailedTarget = null;
+					// Presentation changes even when the loaded label equals
+					// the stale cache (healthy null after a failure): the
+					// frame still shows the git fallback, so repaint anyway.
+					this.#onBranchChange?.();
+				}
 				const changed = next !== this.#cachedJjBranch;
 				this.#cachedJjBranch = next;
 				if (changed) this.#onBranchChange?.();

@@ -202,4 +202,34 @@ describe("StatusLineComponent jj label fallback", () => {
 			component.dispose();
 		}
 	});
+
+	it("repaints when recovery yields a healthy null label", async () => {
+		const label = vi.fn<() => Promise<string | null>>().mockRejectedValue(new Error("store gone"));
+		mockBackends(label);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		const onBranchChange = vi.fn();
+		component.updateSettings(gitSettings);
+		component.watchBranch(onBranchChange);
+		try {
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("feature/g");
+			onBranchChange.mockClear();
+
+			// The store is repaired but holds no bookmark: the load succeeds
+			// with null, presentation returns to jj-empty, and the frame
+			// must repaint even though no cached value changed.
+			label.mockResolvedValue(null);
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(onBranchChange).toHaveBeenCalled();
+			expect(component.getTopBorder(80).content).not.toContain("feature/g");
+		} finally {
+			component.dispose();
+		}
+	});
 });
