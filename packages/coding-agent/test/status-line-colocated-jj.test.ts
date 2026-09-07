@@ -438,11 +438,12 @@ describe("StatusLineComponent display detector", () => {
 		component.getTopBorder(80);
 		await flush();
 		const content = component.getTopBorder(80).content;
+		const ESC = String.fromCharCode(27);
 		expect(content).toContain("evil-");
 		expect(content).toContain("bookmark");
-		// The raw erase-display payload is gone (theme ANSI aside, which is
-		// emitted by the renderer itself, not the label).
-		expect(content).not.toContain("[2J");
+		// The repository-controlled erase-display payload is gone, while the
+		// renderer's own theme ANSI (also ESC-led) still styles the frame.
+		expect(content.includes(`${ESC}[2J`)).toBe(false);
 		component.dispose();
 	});
 

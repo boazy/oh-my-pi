@@ -122,7 +122,7 @@ describe("FooterComponent display detector", () => {
 		component.dispose();
 	});
 
-	it("keeps the old watcher when the replacement fails to install", async () => {
+	it("retries the install on the unchanged target after a transient failure", async () => {
 		const root = "/repo/footer-watch-failure";
 		const git = gitDisplay(root, "main");
 		const jj = jjDisplay(root, async () => `recovered-${String.fromCharCode(7)}mark`);
@@ -130,11 +130,14 @@ describe("FooterComponent display detector", () => {
 		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (colocated ? jj : git));
 		const watchTargets: string[] = [];
 		let failJjWatch = true;
-		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+		const watchMock = vi.spyOn(vcs, "watch");
+		watchMock.mockImplementation(((repo: VcsRepo) => {
 			if (repo.kind() === "jj" && failJjWatch) throw new Error("no watch");
 			watchTargets.push(repo.watchTarget());
 			return () => {};
 		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
 
 		const component = new FooterComponent(makeSession());
 		component.watchBranch(() => {});
@@ -149,21 +152,22 @@ describe("FooterComponent display detector", () => {
 		expect(content).toContain("(recovered-");
 		expect(content).not.toContain(String.fromCharCode(7));
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`]);
+		expect(watchMock).toHaveBeenCalledTimes(2);
 
 		// No per-render retry storm while the target is unchanged.
 		component.render(80);
+		expect(watchMock).toHaveBeenCalledTimes(2);
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`]);
 
-		// The next target move retries the install.
+		// The transient failure clears while staying colocated: past the TTL
+		// the same target is retried, the jj watcher installs, and refresh works.
 		failJjWatch = false;
-		colocated = false;
-		content = component.render(80).join("\n");
-		expect(content).toContain("(main)");
-		colocated = true;
+		now += 6_000;
 		component.render(80);
 		await flush();
-		expect(component.render(80).join("\n")).toContain("(recovered-");
-		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
+		content = component.render(80).join("\n");
+		expect(content).toContain("(recovered-");
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
 		component.dispose();
 	});
 });

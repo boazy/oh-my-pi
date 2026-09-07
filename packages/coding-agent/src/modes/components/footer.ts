@@ -11,6 +11,9 @@ import { shortenPath } from "../../tools/render-utils";
 import { sanitizeStatusText } from "../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
 
+/** Minimum interval between watcher-install attempts for one target. */
+const FOOTER_WATCH_RETRY_TTL_MS = 5000;
+
 /**
  * Footer component that shows pwd, token stats, and context usage
  */
@@ -23,6 +26,11 @@ export class FooterComponent implements Component {
 	// Watch target the installed watcher follows; when the display backend
 	// changes under it (late colocation), the watcher is rebound.
 	#watchedTarget: string | null = null;
+
+	// Last watcher-install attempt, bounding retries for a persistently
+	// failing target (see rebind below).
+	#watchAttemptTarget: string | null = null;
+	#watchAttemptAt = 0;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
@@ -66,11 +74,13 @@ export class FooterComponent implements Component {
 		if (!repository) return;
 
 		try {
-			this.#watchedTarget = repository.watchTarget();
-			this.#gitUnwatch = vcs.watch(repository, () => {
+			const target = repository.watchTarget();
+			const unwatch = vcs.watch(repository, () => {
 				this.#invalidateBranch();
 				this.#onBranchChange?.();
 			});
+			this.#gitUnwatch = unwatch;
+			this.#watchedTarget = target;
 		} catch {
 			// Silently fail if we can't watch
 		}
@@ -80,18 +90,22 @@ export class FooterComponent implements Component {
 	// colocation): without this, jj-only label changes never clear the
 	// cached git branch, which has no polling TTL.
 	#rebindWatcherIfTargetChanged(repository: VcsRepo): void {
-		if (!this.#gitUnwatch) return;
 		let target: string | null;
 		try {
 			target = repository.watchTarget();
 		} catch {
 			return;
 		}
-		if (target === this.#watchedTarget) return;
+		if (target === this.#watchedTarget && this.#gitUnwatch) return;
+		// Retry a failed install past the TTL, and handle the initial
+		// no-watcher case explicitly: without this bound the check below
+		// would attempt every render while broken.
+		const now = Date.now();
+		if (target === this.#watchAttemptTarget && now - this.#watchAttemptAt < FOOTER_WATCH_RETRY_TTL_MS) return;
+		this.#watchAttemptTarget = target;
+		this.#watchAttemptAt = now;
 		// Install before disposing: a failed replacement keeps existing
-		// coverage instead of leaving none. The attempt is recorded per
-		// target value, so a persistently failing install does not retry
-		// every render; the next target move tries again.
+		// coverage instead of leaving none.
 		try {
 			const unwatch = vcs.watch(repository, () => {
 				this.#invalidateBranch();
@@ -99,10 +113,10 @@ export class FooterComponent implements Component {
 			});
 			this.#gitUnwatch?.();
 			this.#gitUnwatch = unwatch;
+			this.#watchedTarget = target;
 		} catch {
 			// Silently fail if we can't watch
 		}
-		this.#watchedTarget = target;
 		this.#invalidateBranch();
 	}
 
