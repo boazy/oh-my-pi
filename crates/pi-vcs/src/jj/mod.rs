@@ -76,7 +76,10 @@ impl JjWorkspace {
 /// Resolve the `.jj/repo` directory for `root`, or `None` when `root` is not
 /// a workspace. jj marks a workspace via `.jj/repo`: a directory in the
 /// default workspace, or a FILE (created by `jj workspace add`) whose contents
-/// are a path — relative to `.jj` — to the default workspace's repo dir.
+/// are a path — relative to `.jj` — to the default workspace's repo dir. A
+/// file indirection whose target is missing (stale linked marker) or is not
+/// a directory is NOT a workspace: returning `None` lets discovery continue
+/// upward instead of preferring an unusable handle forever.
 fn resolve_repo_dir(root: &Path) -> Option<PathBuf> {
 	let jj_dir = root.join(".jj");
 	let repo_path = jj_dir.join("repo");
@@ -92,5 +95,9 @@ fn resolve_repo_dir(root: &Path) -> Option<PathBuf> {
 	if target.is_empty() {
 		return None;
 	}
-	Some(crate::git::normalize_path(&jj_dir.join(target)))
+	let resolved = crate::git::normalize_path(&jj_dir.join(target));
+	std::fs::metadata(&resolved)
+		.ok()
+		.filter(|target_meta| target_meta.is_dir())
+		.map(|_| resolved)
 }
