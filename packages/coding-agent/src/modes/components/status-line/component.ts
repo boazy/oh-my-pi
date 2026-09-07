@@ -613,7 +613,13 @@ export class StatusLineComponent implements Component {
 			// the cache without a render-path walk.
 			const fresh = now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS;
 			const stable = cache.displayRepository.kind() !== "git" || cache.repository?.kind() !== "git";
-			if (fresh || (stable && displayWatchTargetAlive(cache.displayRepository))) return cache.displayRepository;
+			if (fresh) return cache.displayRepository;
+			// A live workspace needs no walk, but the timestamp must still
+			// advance — otherwise every render past the TTL stats again.
+			if (stable && displayWatchTargetAlive(cache.displayRepository)) {
+				cache.displayRepositoryCheckedAt = now;
+				return cache.displayRepository;
+			}
 		} else if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) {
 			return null;
 		}
