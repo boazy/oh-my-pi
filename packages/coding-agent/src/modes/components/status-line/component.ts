@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -278,6 +279,17 @@ function displayWatchTarget(repository: VcsRepo | null): string | null {
 	}
 }
 
+/**
+ * Whether the workspace behind a cached display handle still exists,
+ * probed through its head watch target (one stat, no repository walk).
+ */
+function displayWatchTargetAlive(repository: VcsRepo): boolean {
+	try {
+		return existsSync(repository.watchTarget());
+	} catch {
+		return false;
+	}
+}
 /**
  * Project + worktree-dir names when `cwd` is a linked git worktree, else null.
  * The project name comes from the shared primary checkout; bare-repo worktrees
@@ -601,7 +613,7 @@ export class StatusLineComponent implements Component {
 			// the cache without a render-path walk.
 			const fresh = now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS;
 			const stable = cache.displayRepository.kind() !== "git" || cache.repository?.kind() !== "git";
-			if (fresh || stable) return cache.displayRepository;
+			if (fresh || (stable && displayWatchTargetAlive(cache.displayRepository))) return cache.displayRepository;
 		} else if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) {
 			return null;
 		}
@@ -1114,8 +1126,12 @@ export class StatusLineComponent implements Component {
 			(async () => {
 				let next: string | null = null;
 				try {
-					next =
+					const raw =
 						(await repository.label(withTimeoutSignal(JJ_COMMAND_TIMEOUT_MS, request.controller.signal))) ?? null;
+					// Repository-controlled jj metadata can carry control
+					// characters; sanitize at the cache boundary (the git segment
+					// renders the label verbatim).
+					next = raw === null ? null : sanitizeStatusText(raw);
 				} catch {
 					next = null;
 				} finally {
@@ -1238,6 +1254,7 @@ export class StatusLineComponent implements Component {
 		unstaged: number;
 		untracked: number;
 	} | null {
+
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
@@ -1246,10 +1263,12 @@ export class StatusLineComponent implements Component {
 		// Colocated workspaces present the jj label, but status counts come
 		// from the operational git status: the jj status path reads the last
 		// snapshotted commit and misses live working-copy edits until the next
-		// jj operation, while snapshotting from render is off the table. (A jj
-		// display paired with a git operational repo implies equal roots.)
+		// jj operation, while snapshotting from render is off the table.
+		// Equal roots mean colocation; with different roots the jj workspace
+		// is nested inside a stale cached git repo and keeps pure-jj behavior.
 		const operational = display.kind() === "jj" ? this.#resolveRepository(activeRepoCache) : null;
-		const repository = operational?.kind() === "git" ? operational : display;
+		const colocated = operational?.kind() === "git" && operational.root() === display.root();
+		const repository = colocated ? operational : display;
 		if (repository.kind() === "jj") {
 			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
 				return this.#cachedJjStatus;

@@ -95,7 +95,7 @@ describe("FooterComponent display detector", () => {
 	it("rebinds the watcher and label when colocation appears after setup", async () => {
 		const root = "/repo/footer-colocate";
 		const git = gitDisplay(root, "main");
-		const jj = jjDisplay(root, async () => "footer-bookmark");
+		const jj = jjDisplay(root, async () => `footer-${String.fromCharCode(7)}bookmark`);
 		let colocated = false;
 		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (colocated ? jj : git));
 		const watchTargets: string[] = [];
@@ -114,7 +114,9 @@ describe("FooterComponent display detector", () => {
 		component.render(80);
 		await flush();
 		const content = component.render(80).join("\n");
-		expect(content).toContain("(footer-bookmark)");
+		expect(content).toContain("(footer-");
+		expect(content).toContain("bookmark)");
+		expect(content).not.toContain(String.fromCharCode(7));
 		expect(content).not.toContain("(main)");
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
 		component.dispose();

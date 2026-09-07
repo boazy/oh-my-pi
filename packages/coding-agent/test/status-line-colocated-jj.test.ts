@@ -11,6 +11,9 @@
  * a jj bookmark/change id must never become a GitHub head.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
@@ -201,6 +204,29 @@ describe("StatusLineComponent display detector", () => {
 		onBranchChange.mockClear();
 		watchCallbacks.get(`${root}/.git/HEAD`)?.();
 		expect(onBranchChange).toHaveBeenCalled();
+		component.dispose();
+	});
+
+	it("uses jj status for a nested jj workspace inside a cached git repo", async () => {
+		const outer = "/outer";
+		const inner = "/outer/sub";
+		const operational = operationalGit(outer, headFor("main"));
+		const display = displayJj(inner, async () => "inner-bookmark", { staged: 7, unstaged: 8, untracked: 9 });
+		mockRepos(operational, display, inner);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+
+		component.getTopBorder(80);
+		await flush();
+		// Different roots mean nesting, not colocation: the jj label shows,
+		// but counts come from the jj backend rather than the outer git repo.
+		const content = component.getTopBorder(80).content;
+		expect(content).toContain("inner-bookmark");
+		expect(content).toContain("*8");
+		expect(content).toContain("+7");
+		expect(content).toContain("?9");
 		component.dispose();
 	});
 
@@ -397,5 +423,98 @@ describe("StatusLineComponent display detector", () => {
 		await flush();
 		expect(run).toHaveBeenCalledTimes(2);
 		component.dispose();
+	});
+
+	it("sanitizes control characters from the jj label", async () => {
+		const root = "/repo/sanitize";
+		const operational = operationalGit(root, headFor("main"));
+		const display = displayJj(root, async () => `evil-${String.fromCharCode(27)}[2J-bookmark`, { staged: 0, unstaged: 0, untracked: 0 });
+		mockRepos(operational, display, root);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+
+		component.getTopBorder(80);
+		await flush();
+		const content = component.getTopBorder(80).content;
+		expect(content).toContain("evil-");
+		expect(content).toContain("bookmark");
+		// The raw erase-display payload is gone (theme ANSI aside, which is
+		// emitted by the renderer itself, not the label).
+		expect(content).not.toContain("[2J");
+		component.dispose();
+	});
+
+	it("falls back to re-discovery when the jj workspace vanishes", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "omp-jj-vanish-"));
+		const heads = join(dir, ".jj", "repo", "op_heads", "heads");
+		mkdirSync(heads, { recursive: true });
+		try {
+			const operational = operationalGit(dir, headFor("main"));
+			const jjGone = displayJj(dir, async () => "gone-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+			const gitAgain = operationalGit(dir, headFor("main"));
+			mockRepos(operational, jjGone, dir);
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let displayCalls = 0;
+			vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (++displayCalls === 1 ? jjGone : gitAgain));
+
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => {});
+
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("gone-bookmark");
+
+			// The workspace vanishes; past the cadence the display falls
+			// back to re-discovery and the git branch returns.
+			rmSync(join(dir, ".jj"), { recursive: true, force: true });
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("main");
+			expect(component.getTopBorder(80).content).not.toContain("gone-bookmark");
+			component.dispose();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a live jj workspace without re-discovery walks", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "omp-jj-alive-"));
+		const heads = join(dir, ".jj", "repo", "op_heads", "heads");
+		mkdirSync(heads, { recursive: true });
+		try {
+			const operational = operationalGit(dir, headFor("main"));
+			const display = displayJj(dir, async () => "steady-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+			mockRepos(operational, display, dir);
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			let displayCalls = 0;
+			vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => {
+				displayCalls++;
+				return display;
+			});
+
+			const component = new StatusLineComponent(makeSession());
+			component.updateSettings(gitSegment);
+			component.watchBranch(() => {});
+
+			component.getTopBorder(80);
+			await flush();
+			expect(component.getTopBorder(80).content).toContain("steady-bookmark");
+
+			// Past the cadence the live watch target short-circuits: no walk.
+			now += 6_000;
+			component.getTopBorder(80);
+			await flush();
+			expect(displayCalls).toBe(1);
+			expect(component.getTopBorder(80).content).toContain("steady-bookmark");
+			component.dispose();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
