@@ -592,6 +592,10 @@ export class StatusLineComponent implements Component {
 		} else if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) {
 			return null;
 		}
+		const prevBackend =
+			cache.displayRepository !== null
+				? `${cache.displayRepository.kind()}:${cache.displayRepository.root()}`
+				: null;
 		let display: VcsRepo | null;
 		try {
 			display = vcs.repoForDisplay(cache.effectiveGitCwd);
@@ -600,6 +604,15 @@ export class StatusLineComponent implements Component {
 		}
 		cache.displayRepository = display ?? cache.repository;
 		cache.displayRepositoryCheckedAt = now;
+		if (cache.displayRepository && this.#gitUnwatch) {
+			const nextBackend = `${cache.displayRepository.kind()}:${cache.displayRepository.root()}`;
+			if (prevBackend !== nextBackend) {
+				// The backend changed under an installed watcher (late
+				// colocation): rebind both targets so jj-only changes
+				// invalidate from now on.
+				this.#setupGitWatcher();
+			}
+		}
 		return cache.displayRepository;
 	}
 
@@ -1218,8 +1231,15 @@ export class StatusLineComponent implements Component {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
-		const repository = this.#resolveDisplayRepository(activeRepoCache);
-		if (!repository) return null;
+		const display = this.#resolveDisplayRepository(activeRepoCache);
+		if (!display) return null;
+		// Colocated workspaces present the jj label, but status counts come
+		// from the operational git status: the jj status path reads the last
+		// snapshotted commit and misses live working-copy edits until the next
+		// jj operation, while snapshotting from render is off the table. (A jj
+		// display paired with a git operational repo implies equal roots.)
+		const operational = display.kind() === "jj" ? this.#resolveRepository(activeRepoCache) : null;
+		const repository = operational?.kind() === "git" ? operational : display;
 		if (repository.kind() === "jj") {
 			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
 				return this.#cachedJjStatus;

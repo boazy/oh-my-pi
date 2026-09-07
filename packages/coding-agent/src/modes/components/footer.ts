@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -18,6 +19,10 @@ export class FooterComponent implements Component {
 	#branchResolve: AbortController | undefined;
 	#branchGeneration = 0;
 	#gitUnwatch: (() => void) | null = null;
+
+	// Watch target the installed watcher follows; when the display backend
+	// changes under it (late colocation), the watcher is rebound.
+	#watchedTarget: string | null = null;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
@@ -61,12 +66,30 @@ export class FooterComponent implements Component {
 		if (!repository) return;
 
 		try {
+			this.#watchedTarget = repository.watchTarget();
 			this.#gitUnwatch = vcs.watch(repository, () => {
 				this.#invalidateBranch();
 				this.#onBranchChange?.();
 			});
 		} catch {
 			// Silently fail if we can't watch
+		}
+	}
+
+	// Rebind the watcher when the display backend changed under it (late
+	// colocation): without this, jj-only label changes never clear the
+	// cached git branch, which has no polling TTL.
+	#rebindWatcherIfTargetChanged(repository: VcsRepo): void {
+		if (!this.#gitUnwatch) return;
+		let target: string | null;
+		try {
+			target = repository.watchTarget();
+		} catch {
+			return;
+		}
+		if (target !== this.#watchedTarget) {
+			this.#setupGitWatcher();
+			this.#invalidateBranch();
 		}
 	}
 
@@ -97,10 +120,6 @@ export class FooterComponent implements Component {
 	 */
 	#getCurrentBranch(): string | null {
 		if (!settings.get("git.enabled")) return null;
-		if (this.#cachedBranch !== undefined) {
-			return this.#cachedBranch;
-		}
-
 		const repository = (() => {
 			try {
 				return vcs.repoForDisplay(getProjectDir());
@@ -112,7 +131,10 @@ export class FooterComponent implements Component {
 			this.#cachedBranch = null;
 			return null;
 		}
-
+		this.#rebindWatcherIfTargetChanged(repository);
+		if (this.#cachedBranch !== undefined) {
+			return this.#cachedBranch;
+		}
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
 			if (!this.#branchResolve) {

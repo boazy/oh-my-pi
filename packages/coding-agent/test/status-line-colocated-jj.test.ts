@@ -97,8 +97,16 @@ function gitWithDefaultBranch(branch: string): VcsGitRepo {
 	return { defaultBranch: async () => branch, linkedWorktree: () => null } as unknown as VcsGitRepo;
 }
 
-function operationalGit(root: string, head: VcsHeadState | null): VcsRepo {
-	const handle = gitHandle(head);
+function operationalGit(
+	root: string,
+	head: VcsHeadState | null,
+	status: GitStatus = { staged: 0, unstaged: 0, untracked: 0 },
+): VcsRepo {
+	const handle = {
+		headSync: () => head,
+		linkedWorktree: () => null,
+		statusSummary: async (): Promise<GitStatus | null> => status,
+	} as unknown as VcsGitRepo;
 	return {
 		kind: () => "git",
 		asGit: () => handle,
@@ -149,10 +157,10 @@ function mockRepos(operational: VcsRepo, display: VcsRepo, root: string): void {
 }
 
 describe("StatusLineComponent display detector", () => {
-	it("shows the jj bookmark and jj status with the jj watch target when colocated", async () => {
+	it("shows the jj bookmark with live git status when colocated", async () => {
 		const root = "/repo/colocated";
-		const operational = operationalGit(root, headFor("main"));
-		const display = displayJj(root, async () => "my-bookmark", { staged: 1, unstaged: 2, untracked: 3 });
+		const operational = operationalGit(root, headFor("main"), { staged: 1, unstaged: 2, untracked: 3 });
+		const display = displayJj(root, async () => "my-bookmark", { staged: 7, unstaged: 8, untracked: 9 });
 		mockRepos(operational, display, root);
 		const watched: VcsRepo[] = [];
 		const watchCallbacks = new Map<string, () => void>();
@@ -183,6 +191,11 @@ describe("StatusLineComponent display detector", () => {
 		expect(content).toContain("*2");
 		expect(content).toContain("+1");
 		expect(content).toContain("?3");
+		// Counts come from the live operational git status, not the
+		// snapshot-bound jj status.
+		expect(content).not.toContain("*8");
+		expect(content).not.toContain("+7");
+		expect(content).not.toContain("?9");
 		// Firing the operational watcher requests a repaint even though jj
 		// op heads never moved.
 		onBranchChange.mockClear();
@@ -278,6 +291,11 @@ describe("StatusLineComponent display detector", () => {
 		const jjDisplay = displayJj(root, async () => "late-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
 		const gitDisplay = operationalGit(root, headFor("git-branch-name"));
 		mockRepos(operational, gitDisplay, root);
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		let displayCalls = 0;
@@ -298,6 +316,8 @@ describe("StatusLineComponent display detector", () => {
 		await flush();
 		expect(displayCalls).toBeGreaterThan(1);
 		expect(component.getTopBorder(80).content).toContain("late-bookmark");
+		// The backend swap rebound the watcher from .git/HEAD to jj op heads.
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`, `${root}/.git/HEAD`]);
 		component.dispose();
 	});
 
