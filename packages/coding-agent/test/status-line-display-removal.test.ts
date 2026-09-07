@@ -152,34 +152,6 @@ describe("StatusLineComponent display removal", () => {
 		}
 	});
 
-	it("keeps the handle when only display blips but operational resolves", async () => {
-		const repo = gitRepo();
-		let displayRepo: VcsRepo | null = repo;
-		vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
-		vi.spyOn(vcs, "git").mockReturnValue(repo.asGit());
-		vi.spyOn(vcs, "repo").mockReturnValue(repo);
-		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => displayRepo);
-		let now = Date.now();
-		vi.spyOn(Date, "now").mockImplementation(() => now);
-
-		const component = new StatusLineComponent(makeSession());
-		component.updateSettings(gitSettings);
-		try {
-			component.getTopBorder(80);
-			await flush();
-			expect(component.getTopBorder(80).content).toContain("feature/a");
-
-			// A lone display null while operational resolves (racing
-			// mutation, skewed detectors) must not nuke the handle.
-			displayRepo = null;
-			now += 6_000;
-			component.getTopBorder(80);
-			await flush();
-			expect(component.getTopBorder(80).content).toContain("feature/a");
-		} finally {
-			component.dispose();
-		}
-	});
 	it("keeps the stale handle when discovery throws", async () => {
 		const repo = gitRepo();
 		let failDiscovery = false;

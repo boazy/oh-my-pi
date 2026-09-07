@@ -729,20 +729,16 @@ export class StatusLineComponent implements Component {
 		}
 		if (display) {
 			cache.displayRepository = display;
-		} else if (discoveryFailed || !cache.displayRepository) {
-			// Discovery threw (transient I/O), or this is the first
-			// resolution: keep the stale handle, falling back to
-			// operational. A transient failure must not read as removal.
+		} else if (discoveryFailed) {
+			// Discovery threw (transient I/O): keep the stale handle,
+			// falling back to operational on first resolution. A transient
+			// failure must not read as repository removal.
 			cache.displayRepository ??= cache.repository;
 		} else {
-			// Authoritative null rediscovery: confirm through the operational
-			// detector before dropping the stale handle. A lone display blip
-			// while operational still resolves (racing mutation, skewed
-			// detectors) keeps today's behavior; only agreement means
-			// removal, and the target change below then invalidates caches
-			// and rebuilds watchers.
-			this.#refreshOperational(cache);
-			if (!cache.repository) cache.displayRepository = null;
+			// Authoritative null rediscovery: the repository was removed.
+			// Drop the stale handle so its branch stops rendering; the
+			// target change below invalidates caches and rebuilds watchers.
+			cache.displayRepository = null;
 		}
 		cache.displayRepositoryCheckedAt = now;
 		if ((cache.displayRepository || prevTarget) && prevTarget !== displayWatchTarget(cache.displayRepository)) {

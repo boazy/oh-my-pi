@@ -148,7 +148,7 @@ beforeEach(() => {
 	jjControls.label.mockReset().mockResolvedValue(null);
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
 	vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
-	vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
+	vi.spyOn(vcs, "repo").mockImplementation(() => fakeVcsRepository);
 	// Presentation now resolves a second handle: forward to the operational
 	// double's current implementation without recording an extra `repo` call,
 	// so these scenarios keep display == operational (pure git / pure jj)
@@ -211,7 +211,7 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		gitControls.headSync.mockReturnValue(null); // no git branch -> jj overlay
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise); // isolate the jj fire
-		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
+		vi.spyOn(vcs, "repo").mockImplementation(() => fakeJjRepository);
 		const label = Promise.withResolvers<string | null>();
 		jjControls.label.mockReturnValue(label.promise);
 
@@ -235,7 +235,7 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 		gitControls.headSync.mockReturnValue(null); // no git -> jj repo
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
+		vi.spyOn(vcs, "repo").mockImplementation(() => fakeJjRepository);
 		jjControls.label.mockReturnValue(Promise.withResolvers<string | null>().promise); // isolate the status fire
 		const status = Promise.withResolvers<GitStatus | null>();
 		jjControls.statusSummary.mockReturnValue(status.promise);
@@ -531,7 +531,7 @@ describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 		gitControls.headSync.mockReturnValue(null);
 		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
+		vi.spyOn(vcs, "repo").mockImplementation(() => fakeJjRepository);
 
 		const labelRequests: Array<{ signal: AbortSignal; resolve: (value: string | null) => void }> = [];
 		jjControls.label.mockImplementation(signal => {
