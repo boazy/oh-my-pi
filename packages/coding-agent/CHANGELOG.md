@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In colocated jj-git workspaces, the status line and legacy footer now show the Jujutsu bookmark/change label and working-copy status instead of a detached git HEAD. Git-backed automation still resolves these directories to Git ([#11071](https://github.com/can1357/oh-my-pi/issues/11071)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

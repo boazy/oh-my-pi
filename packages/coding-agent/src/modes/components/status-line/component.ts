@@ -395,7 +395,13 @@ export class StatusLineComponent implements Component {
 	// dropped rather than overwrite the value the newer resolve committed.
 	// Mirrors #jjCacheGeneration / #getBranchLabel in this file.
 	#branchCacheGeneration = 0;
+
 	#gitUnwatch: (() => void) | null = null;
+	// Operational-git head watcher, installed only when the display backend
+	// differs (colocated jj): a direct `git switch` moves .git/HEAD without
+	// touching jj op heads, so the display watcher alone cannot invalidate
+	// the git branch/PR cache.
+	#operationalGitUnwatch: (() => void) | null = null;
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
@@ -574,9 +580,18 @@ export class StatusLineComponent implements Component {
 	}
 
 	#resolveDisplayRepository(cache: ActiveRepoCache): VcsRepo | null {
-		if (cache.displayRepository) return cache.displayRepository;
 		const now = Date.now();
-		if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
+		if (cache.displayRepository) {
+			// A plain git checkout can gain colocation mid-session
+			// (`jj git init --colocate`) without changing cwd: revalidate
+			// git/git pairs at the failure-poll cadence, otherwise serve
+			// the cache without a render-path walk.
+			const fresh = now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS;
+			const stable = cache.displayRepository.kind() !== "git" || cache.repository?.kind() !== "git";
+			if (fresh || stable) return cache.displayRepository;
+		} else if (now - cache.displayRepositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) {
+			return null;
+		}
 		let display: VcsRepo | null;
 		try {
 			display = vcs.repoForDisplay(cache.effectiveGitCwd);
@@ -823,12 +838,39 @@ export class StatusLineComponent implements Component {
 		} catch {
 			this.#gitWatcherUnavailable = true;
 		}
+
+		// Colocated workspaces present through jj, but PR/default-branch state
+		// still derives from the operational git repository: retain its head
+		// target too whenever it differs from the display target, so a direct
+		// `git switch` (valid: colocation stays Git-safe) invalidates the git
+		// branch/PR cache instead of leaving it on the old branch.
+		const operationalForWatch = this.#resolveRepository(activeRepoCache);
+		if (operationalForWatch && operationalForWatch.kind() === "git") {
+			const operationalGitRoot = operationalForWatch.root();
+			const displayGitRoot = repository.kind() === "git" ? repository.root() : null;
+			if (operationalGitRoot !== displayGitRoot) {
+				try {
+					const unwatchOperational = vcs.watch(operationalForWatch, () => {
+						if (this.#disposed || this.#operationalGitUnwatch !== unwatchOperational) return;
+						this.invalidateGitCaches();
+						this.#onBranchChange?.();
+					});
+					this.#operationalGitUnwatch = unwatchOperational;
+				} catch {
+					// Display-watcher coverage remains; PR state then refreshes
+					// on the next poll/cwd change instead.
+				}
+			}
+		}
 	}
 
 	#retireGitWatcher(): void {
 		const unwatch = this.#gitUnwatch;
 		this.#gitUnwatch = null;
 		unwatch?.();
+		const unwatchOperational = this.#operationalGitUnwatch;
+		this.#operationalGitUnwatch = null;
+		unwatchOperational?.();
 	}
 
 	dispose(): void {

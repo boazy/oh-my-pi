@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `vcsDiscoverForDisplay` (`repoForDisplay`): like repository discovery, but equal-root jj+git ties prefer Jujutsu for display surfaces. Git-safe automation must keep using `vcsDiscover` ([#11071](https://github.com/can1357/oh-my-pi/issues/11071)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

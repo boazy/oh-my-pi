@@ -154,9 +154,11 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, headFor("main"));
 		const display = displayJj(root, async () => "my-bookmark", { staged: 1, unstaged: 2, untracked: 3 });
 		mockRepos(operational, display, root);
-		let watched: VcsRepo | null = null;
-		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
-			watched = repo;
+		const watched: VcsRepo[] = [];
+		const watchCallbacks = new Map<string, () => void>();
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo, onChange: () => void) => {
+			watched.push(repo);
+			watchCallbacks.set(repo.watchTarget(), onChange);
 			return () => {};
 		}) as unknown as typeof vcs.watch);
 
@@ -170,8 +172,22 @@ describe("StatusLineComponent display detector", () => {
 
 		expect(vcs.repoForDisplay).toHaveBeenCalled();
 		expect(onBranchChange).toHaveBeenCalled();
-		expect(component.getTopBorder(80).content).toContain("my-bookmark");
-		expect((watched as VcsRepo | null)?.watchTarget()).toBe(`${root}/.jj/repo/op_heads/heads`);
+		// Both head targets are watched: jj op heads for the label/status,
+		// .git/HEAD so a direct git switch invalidates the git branch/PR cache.
+		expect(watched.map(repo => repo.watchTarget()).sort()).toEqual(
+			[`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`].sort(),
+		);
+		// The 1/2/3 counts come from the jj double (the git double reports zeros).
+		const content = component.getTopBorder(80).content;
+		expect(content).toContain("my-bookmark");
+		expect(content).toContain("*2");
+		expect(content).toContain("+1");
+		expect(content).toContain("?3");
+		// Firing the operational watcher requests a repaint even though jj
+		// op heads never moved.
+		onBranchChange.mockClear();
+		watchCallbacks.get(`${root}/.git/HEAD`)?.();
+		expect(onBranchChange).toHaveBeenCalled();
 		component.dispose();
 	});
 
@@ -179,6 +195,11 @@ describe("StatusLineComponent display detector", () => {
 		const root = "/repo/nested";
 		const operational = operationalGit(root, headFor("git-branch-name"));
 		mockRepos(operational, operationalGit(root, headFor("git-branch-name")), root);
+		const watched: VcsRepo[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watched.push(repo);
+			return () => {};
+		}) as unknown as typeof vcs.watch);
 
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSegment);
@@ -187,6 +208,8 @@ describe("StatusLineComponent display detector", () => {
 		component.getTopBorder(80);
 		await flush();
 		expect(component.getTopBorder(80).content).toContain("git-branch-name");
+		// One backend, one target: no redundant operational watcher.
+		expect(watched.map(repo => repo.watchTarget())).toEqual([`${root}/.git/HEAD`]);
 		component.dispose();
 	});
 
@@ -246,6 +269,35 @@ describe("StatusLineComponent display detector", () => {
 		expect(run.mock.calls[0]?.[1]).toEqual(["pr", "view", "--json", "number,url"]);
 		expect(component.getTopBorder(80).content).toContain("feature-x");
 		expect(component.getTopBorder(80).content).toContain("#7");
+		component.dispose();
+	});
+
+	it("picks up colocation that appears after the first paint", async () => {
+		const root = "/repo/late-colocate";
+		const operational = operationalGit(root, headFor("git-branch-name"));
+		const jjDisplay = displayJj(root, async () => "late-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+		const gitDisplay = operationalGit(root, headFor("git-branch-name"));
+		mockRepos(operational, gitDisplay, root);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		let displayCalls = 0;
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (displayCalls++ === 0 ? gitDisplay : jjDisplay));
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("git-branch-name");
+
+		// Past the revalidation cadence the display detector observes the
+		// new jj workspace and the label switches to the bookmark.
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		expect(displayCalls).toBeGreaterThan(1);
+		expect(component.getTopBorder(80).content).toContain("late-bookmark");
 		component.dispose();
 	});
 });
