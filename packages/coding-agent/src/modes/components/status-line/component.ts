@@ -698,6 +698,11 @@ export class StatusLineComponent implements Component {
 			this.#defaultBranchRepoId = undefined;
 			this.#defaultBranchGeneration++;
 			this.#setupGitWatcher();
+			// The PR payload itself (not just its context) belongs to the old
+			// repo: on a default branch no replacement lookup ever runs, so
+			// retaining it would display it indefinitely. Generic activity
+			// invalidation deliberately keeps stale-visible until resolved.
+			this.#cachedPr = null;
 			this.invalidateGitCaches();
 		}
 		return cache.displayRepository;

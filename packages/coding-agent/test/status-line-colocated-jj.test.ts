@@ -851,4 +851,55 @@ describe("StatusLineComponent display detector", () => {
 		expect(component.getTopBorder(80).content).toContain("#7");
 		component.dispose();
 	});
+
+	it("drops the cached PR when redirecting onto a default branch", async () => {
+		const root = "/repo/retarget-pr";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const repoA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("feature")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const repoB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		vi.spyOn(vcs, "repo").mockImplementation(() => (moved ? repoB : repoA));
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? repoB : repoA));
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("#7");
+		expect(run).toHaveBeenCalledTimes(1);
+
+		// Redirect onto repo B's default branch: no replacement lookup runs,
+		// so repo A's PR must vanish rather than linger.
+		moved = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		const content = component.getTopBorder(80).content;
+		expect(content).not.toContain("#7");
+		expect(run).toHaveBeenCalledTimes(1);
+		component.dispose();
+	});
 });
