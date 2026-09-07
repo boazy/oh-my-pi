@@ -447,18 +447,30 @@ mod tests {
 
 	#[test]
 	fn stale_linked_marker_falls_back_to_git() {
+		// Stale marker nested inside an outer Git checkout: discovery must
+		// skip the unusable handle and continue upward to Git. Pre-fix both
+		// detectors preferred the stale handle here (the inner jj root
+		// counts as a strict descendant of the outer git root), so this
+		// case guards the changed fallback path in each detector.
+		let outer = tempfile::tempdir().unwrap();
+		init_git(outer.path());
+		let inner = outer.path().join("sub");
+		fs::create_dir_all(inner.join(".jj")).unwrap();
+		fs::write(inner.join(".jj/repo"), "../elsewhere\n").unwrap();
+		assert!(matches!(detect(&inner).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(&inner).unwrap(), Some(Repo::Git(_))));
+
 		// Stale linked-workspace pointer plus a usable equal-root Git
 		// checkout: both detectors must prefer Git over the unusable
-		// handle, in every root ordering.
+		// handle. (On an equal-root tie `detect` already preferred Git
+		// pre-fix via its tie-break; only the display assertion guards
+		// there.)
 		let temp = tempfile::tempdir().unwrap();
 		init_git(temp.path());
 		fs::create_dir_all(temp.path().join(".jj")).unwrap();
 		fs::write(temp.path().join(".jj/repo"), "../elsewhere\n").unwrap();
 		assert!(matches!(detect(temp.path()).unwrap(), Some(Repo::Git(_))));
-		assert!(matches!(
-			detect_for_display(temp.path()).unwrap(),
-			Some(Repo::Git(_))
-		));
+		assert!(matches!(detect_for_display(temp.path()).unwrap(), Some(Repo::Git(_))));
 
 		// A pointer at an existing file is not a repo dir either.
 		let file_target = tempfile::tempdir().unwrap();
@@ -466,14 +478,8 @@ mod tests {
 		fs::create_dir_all(file_target.path().join(".jj")).unwrap();
 		fs::write(file_target.path().join("not-a-repo"), "junk\n").unwrap();
 		fs::write(file_target.path().join(".jj/repo"), "../not-a-repo\n").unwrap();
-		assert!(matches!(
-			detect(file_target.path()).unwrap(),
-			Some(Repo::Git(_))
-		));
-		assert!(matches!(
-			detect_for_display(file_target.path()).unwrap(),
-			Some(Repo::Git(_))
-		));
+		assert!(matches!(detect(file_target.path()).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(file_target.path()).unwrap(), Some(Repo::Git(_))));
 	}
 
 	#[test]
