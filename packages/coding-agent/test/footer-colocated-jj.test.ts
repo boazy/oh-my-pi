@@ -121,4 +121,49 @@ describe("FooterComponent display detector", () => {
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
 		component.dispose();
 	});
+
+	it("keeps the old watcher when the replacement fails to install", async () => {
+		const root = "/repo/footer-watch-failure";
+		const git = gitDisplay(root, "main");
+		const jj = jjDisplay(root, async () => `recovered-${String.fromCharCode(7)}mark`);
+		let colocated = false;
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (colocated ? jj : git));
+		const watchTargets: string[] = [];
+		let failJjWatch = true;
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			if (repo.kind() === "jj" && failJjWatch) throw new Error("no watch");
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		expect(component.render(80).join("\n")).toContain("(main)");
+
+		// The replacement throws: the label still recovers through the
+		// re-read, and the old watcher is retained.
+		colocated = true;
+		component.render(80);
+		await flush();
+		let content = component.render(80).join("\n");
+		expect(content).toContain("(recovered-");
+		expect(content).not.toContain(String.fromCharCode(7));
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`]);
+
+		// No per-render retry storm while the target is unchanged.
+		component.render(80);
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`]);
+
+		// The next target move retries the install.
+		failJjWatch = false;
+		colocated = false;
+		content = component.render(80).join("\n");
+		expect(content).toContain("(main)");
+		colocated = true;
+		component.render(80);
+		await flush();
+		expect(component.render(80).join("\n")).toContain("(recovered-");
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
+		component.dispose();
+	});
 });

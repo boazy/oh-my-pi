@@ -87,10 +87,23 @@ export class FooterComponent implements Component {
 		} catch {
 			return;
 		}
-		if (target !== this.#watchedTarget) {
-			this.#setupGitWatcher();
-			this.#invalidateBranch();
+		if (target === this.#watchedTarget) return;
+		// Install before disposing: a failed replacement keeps existing
+		// coverage instead of leaving none. The attempt is recorded per
+		// target value, so a persistently failing install does not retry
+		// every render; the next target move tries again.
+		try {
+			const unwatch = vcs.watch(repository, () => {
+				this.#invalidateBranch();
+				this.#onBranchChange?.();
+			});
+			this.#gitUnwatch?.();
+			this.#gitUnwatch = unwatch;
+		} catch {
+			// Silently fail if we can't watch
 		}
+		this.#watchedTarget = target;
+		this.#invalidateBranch();
 	}
 
 	/**
@@ -145,8 +158,9 @@ export class FooterComponent implements Component {
 					.label(request.signal)
 					.then(label => {
 						if (this.#disposed || this.#branchGeneration !== generation) return;
-						const changed = this.#cachedBranch !== label;
-						this.#cachedBranch = label;
+						const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
+						const changed = this.#cachedBranch !== clean;
+						this.#cachedBranch = clean;
 						if (changed) this.#onBranchChange?.();
 					})
 					.catch(() => {
