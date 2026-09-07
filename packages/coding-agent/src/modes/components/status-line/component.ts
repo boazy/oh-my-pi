@@ -868,9 +868,10 @@ export class StatusLineComponent implements Component {
 		// branch/PR cache instead of leaving it on the old branch.
 		const operationalForWatch = this.#resolveRepository(activeRepoCache);
 		if (operationalForWatch && operationalForWatch.kind() === "git") {
-			const operationalGitRoot = operationalForWatch.root();
-			const displayGitRoot = repository.kind() === "git" ? repository.root() : null;
-			if (operationalGitRoot !== displayGitRoot) {
+			// Dedupe by watched target, not root: same-root handles can still
+			// follow different head targets, and dropping .git/HEAD coverage
+			// would blind the git branch/PR cache.
+			if (displayWatchTarget(operationalForWatch) !== displayWatchTarget(repository)) {
 				try {
 					const unwatchOperational = vcs.watch(operationalForWatch, () => {
 						if (this.#disposed || this.#operationalGitUnwatch !== unwatchOperational) return;

@@ -352,8 +352,10 @@ describe("StatusLineComponent display detector", () => {
 		now = movedAt;
 		component.getTopBorder(80);
 		await flush();
-		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.git/refs/heads/main`]);
 		expect(component.getTopBorder(80).content).toContain("main");
+		// Both watchers rebound: display follows the new target while
+		// operational .git/HEAD coverage is retained.
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.git/refs/heads/main`, `${root}/.git/HEAD`]);
 		component.dispose();
 	});
 
