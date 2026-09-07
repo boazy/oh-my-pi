@@ -536,6 +536,8 @@ export class StatusLineComponent implements Component {
 	#prLookupInFlight = false;
 	#defaultBranch?: string;
 	#defaultBranchCwd: string | undefined = undefined;
+	#defaultBranchRepoId: string | null | undefined = undefined;
+	#defaultBranchGeneration = 0;
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
 
@@ -666,10 +668,23 @@ export class StatusLineComponent implements Component {
 		cache.displayRepositoryCheckedAt = now;
 		if (cache.displayRepository && prevTarget !== displayWatchTarget(cache.displayRepository)) {
 			// The backend or head target changed (late colocation,
-			// late-appearing repo, redirected `.git`): rebuild both targets
-			// so jj-only changes invalidate from now on, and drop the
-			// previous backend's cached branch/PR state — the new watcher
-			// only reports future moves, never the current one.
+			// late-appearing repo, redirected `.git`): the operational handle
+			// snapshots git_dir/head_path at discovery, so re-discover it
+			// before rebuilding watchers — otherwise PR/status keep querying
+			// the old repo. Then drop the previous backend's cached
+			// branch/PR/default-branch state (bumping the generation so an
+			// in-flight default-branch lookup cannot repopulate it); a fresh
+			// watcher only reports future moves, never the current one.
+			try {
+				cache.repository = vcs.repo(cache.effectiveGitCwd);
+				cache.repositoryCheckedAt = now;
+			} catch {
+				// Keep the stale handle; the next change retries.
+			}
+			this.#defaultBranch = undefined;
+			this.#defaultBranchCwd = undefined;
+			this.#defaultBranchRepoId = undefined;
+			this.#defaultBranchGeneration++;
 			this.#setupGitWatcher();
 			this.invalidateGitCaches();
 		}
@@ -1275,18 +1290,20 @@ export class StatusLineComponent implements Component {
 		return this.#cachedBranch ?? null;
 	}
 
-	#isDefaultBranch(branch: string, effectiveGitCwd: string): boolean {
-		if (this.#defaultBranchCwd !== effectiveGitCwd) {
+	#isDefaultBranch(branch: string, effectiveGitCwd: string, repoId: string | null): boolean {
+		if (this.#defaultBranchCwd !== effectiveGitCwd || this.#defaultBranchRepoId !== repoId) {
 			this.#defaultBranch = undefined;
 			this.#defaultBranchCwd = effectiveGitCwd;
+			this.#defaultBranchRepoId = repoId;
 		}
 
 		if (this.#defaultBranch === undefined) {
 			this.#defaultBranch = "main";
 			const lookupCwd = effectiveGitCwd;
+			const generation = this.#defaultBranchGeneration;
 			(async () => {
 				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
-				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
+				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd || this.#defaultBranchGeneration !== generation) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
 					if (this.#onBranchChange) {
@@ -1387,8 +1404,9 @@ export class StatusLineComponent implements Component {
 		if (!this.#gitEnabled()) return null;
 
 		const gitCwd = activeRepoCache.effectiveGitCwd;
-		if (this.#resolveRepository(activeRepoCache)?.kind() !== "git") return null;
-		const branch = this.#getBranchLabel(activeRepoCache, this.#resolveRepository(activeRepoCache));
+		const operational = this.#resolveRepository(activeRepoCache);
+		if (operational?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(activeRepoCache, operational);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1404,7 +1422,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		// Don't look up if detached, default branch, or already in flight.
-		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd) || this.#prLookupInFlight) {
+		if (branch === "detached" || this.#isDefaultBranch(branch, gitCwd, displayWatchTarget(operational)) || this.#prLookupInFlight) {
 			return stalePr ?? null;
 		}
 

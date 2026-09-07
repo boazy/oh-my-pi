@@ -657,4 +657,128 @@ describe("StatusLineComponent display detector", () => {
 		expect(watchTargets).toEqual([targetA, targetB, targetA]);
 		component.dispose();
 	});
+
+	it("looks up PRs against the new default after a redirect", async () => {
+		const root = "/repo/retarget-defaults";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const repoA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const repoB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		vi.spyOn(vcs, "repo").mockImplementation(() => (moved ? repoB : repoA));
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? repoB : repoA));
+		// Same branch name, different defaults: only the default cache
+		// decides whether the lookup fires.
+		let defaultName = "main";
+		vi.spyOn(vcs, "git").mockImplementation(() => ({
+			defaultBranch: async () => defaultName,
+			linkedWorktree: () => null,
+		}) as unknown as VcsGitRepo);
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(run).not.toHaveBeenCalled();
+
+		// Same cwd, new repo with a different default: the lookup follows it.
+		moved = true;
+		defaultName = "trunk";
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(component.getTopBorder(80).content).toContain("#7");
+		component.dispose();
+	});
+
+	it("drops an in-flight default-branch lookup across a redirect", async () => {
+		const root = "/repo/retarget-inflight";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const repoA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("feature")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const repoB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		const firstDefault = Promise.withResolvers<string | null>();
+		const secondDefault = Promise.withResolvers<string | null>();
+		let defaultCalls = 0;
+		vi.spyOn(vcs, "git").mockImplementation(
+			(() => ({
+				defaultBranch: () => (++defaultCalls === 1 ? firstDefault.promise : secondDefault.promise),
+				linkedWorktree: () => null,
+			}) as unknown as VcsGitRepo),
+		);
+		vi.spyOn(vcs, "repo").mockImplementation(() => (moved ? repoB : repoA));
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? repoB : repoA));
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValueOnce({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" })
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":8,"url":"https://example.test/x/8"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+
+		// Redirect while the first default lookup is still in flight, then
+		// let the stale resolve land: it must not repopulate the cache.
+		moved = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		firstDefault.resolve("main");
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+
+		// The fresh lookup for the new repo commits instead.
+		secondDefault.resolve("trunk");
+		await flush();
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(2);
+		expect(component.getTopBorder(80).content).toContain("#8");
+		component.dispose();
+	});
 });
