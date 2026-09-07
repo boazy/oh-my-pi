@@ -103,6 +103,8 @@ describe("FooterComponent display detector", () => {
 			watchTargets.push(repo.watchTarget());
 			return () => {};
 		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
 
 		const onBranchChange = vi.fn();
 		const component = new FooterComponent(makeSession());
@@ -111,6 +113,8 @@ describe("FooterComponent display detector", () => {
 		expect(component.render(80).join("\n")).toContain("(main)");
 
 		colocated = true;
+		// Past the sync cadence the new backend is observed.
+		now += 6_000;
 		component.render(80);
 		await flush();
 		const content = component.render(80).join("\n");
@@ -146,6 +150,8 @@ describe("FooterComponent display detector", () => {
 		// The replacement throws: the label still recovers through the
 		// re-read, and the old watcher is retained.
 		colocated = true;
+		// Past the sync cadence the new backend is observed.
+		now += 6_000;
 		component.render(80);
 		await flush();
 		let content = component.render(80).join("\n");

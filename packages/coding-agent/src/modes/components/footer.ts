@@ -11,8 +11,8 @@ import { shortenPath } from "../../tools/render-utils";
 import { sanitizeStatusText } from "../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
 
-/** Minimum interval between watcher-install attempts for one target. */
-const FOOTER_WATCH_RETRY_TTL_MS = 5000;
+/** Minimum interval between display-backend syncs (re-discovery walks). */
+const FOOTER_DISPLAY_SYNC_TTL_MS = 5000;
 
 /**
  * Footer component that shows pwd, token stats, and context usage
@@ -27,10 +27,9 @@ export class FooterComponent implements Component {
 	// changes under it (late colocation), the watcher is rebound.
 	#watchedTarget: string | null = null;
 
-	// Last watcher-install attempt, bounding retries for a persistently
-	// failing target (see rebind below).
-	#watchAttemptTarget: string | null = null;
-	#watchAttemptAt = 0;
+	// Last display-backend sync, bounding re-discovery walks past the
+	// initial setup.
+	#lastDisplayCheckAt = 0;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
 	#autoCompactEnabled: boolean = true;
@@ -86,10 +85,22 @@ export class FooterComponent implements Component {
 		}
 	}
 
-	// Rebind the watcher when the display backend changed under it (late
-	// colocation): without this, jj-only label changes never clear the
-	// cached git branch, which has no polling TTL.
-	#rebindWatcherIfTargetChanged(repository: VcsRepo): void {
+	// Revalidate the display backend on a bounded cadence rather than every
+	// frame: a re-discovery walk runs at most once per TTL, and cached
+	// renders do no VCS discovery. Late colocation rebinds the watcher here;
+	// the TTL-less branch cache is cleared on change so jj-only label
+	// updates flow from then on.
+	#syncDisplayWatcher(): void {
+		const now = Date.now();
+		if (now - this.#lastDisplayCheckAt < FOOTER_DISPLAY_SYNC_TTL_MS) return;
+		this.#lastDisplayCheckAt = now;
+		let repository: VcsRepo | null;
+		try {
+			repository = vcs.repoForDisplay(getProjectDir());
+		} catch {
+			return;
+		}
+		if (!repository) return;
 		let target: string | null;
 		try {
 			target = repository.watchTarget();
@@ -97,13 +108,6 @@ export class FooterComponent implements Component {
 			return;
 		}
 		if (target === this.#watchedTarget && this.#gitUnwatch) return;
-		// Retry a failed install past the TTL, and handle the initial
-		// no-watcher case explicitly: without this bound the check below
-		// would attempt every render while broken.
-		const now = Date.now();
-		if (target === this.#watchAttemptTarget && now - this.#watchAttemptAt < FOOTER_WATCH_RETRY_TTL_MS) return;
-		this.#watchAttemptTarget = target;
-		this.#watchAttemptAt = now;
 		// Install before disposing: a failed replacement keeps existing
 		// coverage instead of leaving none.
 		try {
@@ -115,7 +119,7 @@ export class FooterComponent implements Component {
 			this.#gitUnwatch = unwatch;
 			this.#watchedTarget = target;
 		} catch {
-			// Silently fail if we can't watch
+			// Silently fail if we can't watch; the next TTL window retries.
 		}
 		this.#invalidateBranch();
 	}
@@ -147,6 +151,10 @@ export class FooterComponent implements Component {
 	 */
 	#getCurrentBranch(): string | null {
 		if (!settings.get("git.enabled")) return null;
+		this.#syncDisplayWatcher();
+		if (this.#cachedBranch !== undefined) {
+			return this.#cachedBranch;
+		}
 		const repository = (() => {
 			try {
 				return vcs.repoForDisplay(getProjectDir());
@@ -157,10 +165,6 @@ export class FooterComponent implements Component {
 		if (!repository) {
 			this.#cachedBranch = null;
 			return null;
-		}
-		this.#rebindWatcherIfTargetChanged(repository);
-		if (this.#cachedBranch !== undefined) {
-			return this.#cachedBranch;
 		}
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
