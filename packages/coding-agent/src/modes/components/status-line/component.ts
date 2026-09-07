@@ -674,18 +674,8 @@ export class StatusLineComponent implements Component {
 		const now = Date.now();
 		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return cache.repository;
 		try {
-			const prevTarget = displayWatchTarget(cache.repository);
-			cache.repository = vcs.repo(cache.effectiveGitCwd);
-			cache.repositoryCheckedAt = now;
-			cache.operationalRefreshNeeded = false;
-			if (prevTarget !== displayWatchTarget(cache.repository)) {
-				// Operational identity changed outside a display rebind:
-				// drop default-branch state so a stale in-flight lookup
-				// cannot repopulate it.
-			this.#defaultBranch = undefined;
-			this.#defaultBranchCwd = undefined;
-			this.#defaultBranchRepoId = undefined;
-			this.#defaultBranchGeneration++;
+			if (this.#refreshOperational(cache)) {
+				this.#handleRepositoryTargetChanged();
 			}
 		} catch {
 			// Keep the stale handle (or null); the next window retries.
@@ -706,6 +696,12 @@ export class StatusLineComponent implements Component {
 			if (fresh) return cache.displayRepository;
 			// A live workspace needs no walk, but the timestamp must still
 			// advance — otherwise every render past the TTL stats again.
+			// The operational handle is revalidated here as well: it snapshots
+			// git_dir/head_path at discovery and can move under a stable
+			// display (colocated git redirect with untouched jj).
+			if (stable && cache.displayRepository.kind() === "jj" && this.#refreshOperational(cache)) {
+				this.#handleRepositoryTargetChanged();
+			}
 			if (
 				stable &&
 				!(cache.displayRepository.kind() === "jj" &&
@@ -729,42 +725,56 @@ export class StatusLineComponent implements Component {
 		cache.displayRepositoryCheckedAt = now;
 		if (cache.displayRepository && prevTarget !== displayWatchTarget(cache.displayRepository)) {
 			// The backend or head target changed (late colocation,
-			// late-appearing repo, redirected `.git`): the operational handle
-			// snapshots git_dir/head_path at discovery, so re-discover it
-			// before rebuilding watchers — otherwise PR/status keep querying
-			// the old repo. Then drop the previous backend's cached
-			// branch/PR/default-branch state (bumping the generation so an
-			// in-flight default-branch lookup cannot repopulate it); a fresh
-			// watcher only reports future moves, never the current one.
-			try {
-				cache.repository = vcs.repo(cache.effectiveGitCwd);
-				cache.repositoryCheckedAt = now;
-				cache.operationalRefreshNeeded = false;
-			} catch {
-				// Keep the stale handle; the accessor retries it on a cadence.
-				cache.operationalRefreshNeeded = true;
-			}
-			this.#defaultBranch = undefined;
-			this.#defaultBranchCwd = undefined;
-			this.#defaultBranchRepoId = undefined;
-			this.#defaultBranchGeneration++;
-			this.#setupGitWatcher();
-			// The PR payload itself (not just its context) belongs to the old
-			// repo: on a default branch no replacement lookup ever runs, so
-			// retaining it would display it indefinitely. Generic activity
-			// invalidation deliberately keeps stale-visible until resolved.
-			this.#cachedPr = null;
-			// Git status requests/cache are keyed by cwd alone: drop them here
-			// or the old repo's pending completion publishes A's counts for B
-			// (or blocks B while hung). Ordinary HEAD moves keep the 1s-stale
-			// cache; only a target change resets.
-			this.#gitStatusInFlight = undefined;
-			this.#cachedGitStatus = null;
-			this.#cachedGitStatusCwd = undefined;
-			this.#gitStatusLastFetch = 0;
-			this.invalidateGitCaches();
+			// late-appearing repo, redirected `.git`): refresh the operational
+			// handle too — it snapshots git_dir/head_path at discovery — then
+			// drop the previous backend's cached state and rebuild watchers.
+			// A fresh watcher only reports future moves, never the current one.
+			this.#refreshOperational(cache);
+			this.#handleRepositoryTargetChanged();
 		}
 		return cache.displayRepository;
+	}
+
+	/**
+	 * Re-resolve the operational handle, reporting identity change.
+	 * GitRepo snapshots git_dir/head_path at discovery, so a same-cwd
+	 * redirect strands PR/status/watchers on the old repo unless something
+	 * re-checks. Failures keep the stale handle and flag a retry; success
+	 * clears the flag. Callers gate frequency (TTL windows). Never throws.
+	 */
+	#refreshOperational(cache: ActiveRepoCache): boolean {
+		let prevTarget: string | null = null;
+		try {
+			prevTarget = displayWatchTarget(cache.repository);
+			const fresh = vcs.repo(cache.effectiveGitCwd);
+			cache.repository = fresh;
+			cache.repositoryCheckedAt = Date.now();
+			cache.operationalRefreshNeeded = false;
+		} catch {
+			cache.repositoryCheckedAt = Date.now();
+			cache.operationalRefreshNeeded = true;
+			return false;
+		}
+		return prevTarget !== displayWatchTarget(cache.repository);
+	}
+
+	/**
+	 * Applied when display or operational identity moved: drop all
+	 * backend-derived caches (branch/PR/default/status), bump generations so
+	 * in-flight work cannot repopulate them, and rebuild both watchers.
+	 */
+	#handleRepositoryTargetChanged(): void {
+		this.#defaultBranch = undefined;
+		this.#defaultBranchCwd = undefined;
+		this.#defaultBranchRepoId = undefined;
+		this.#defaultBranchGeneration++;
+		this.#setupGitWatcher();
+		this.invalidateGitCaches();
+		this.#cachedPr = null;
+		this.#gitStatusInFlight = undefined;
+		this.#cachedGitStatus = null;
+		this.#cachedGitStatusCwd = undefined;
+		this.#gitStatusLastFetch = 0;
 	}
 
 	/**

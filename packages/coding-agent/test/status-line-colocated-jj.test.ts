@@ -1093,4 +1093,73 @@ describe("StatusLineComponent display detector", () => {
 		expect(content).not.toContain("*9");
 		component.dispose();
 	});
+
+	it("follows an operational move under a stable jj display", async () => {
+		const root = "/repo/stable-op-move";
+		const jjHeads = `${root}/.jj/repo/op_heads/heads`;
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const display = {
+			kind: () => "jj",
+			asGit: () => null,
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => jjHeads,
+			label: async () => "stable-bookmark",
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const opA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const opB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("branch-b")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 1, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		vi.spyOn(vcs, "repo").mockImplementation(() => (moved ? opB : opA));
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(display);
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("stable-bookmark");
+		expect(run).not.toHaveBeenCalled();
+
+		// The git side redirects with the jj workspace untouched: the stable
+		// display stays, but PR/status/watchers follow the new operational repo.
+		moved = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		const content = component.getTopBorder(80).content;
+		expect(content).toContain("stable-bookmark");
+		expect(content).toContain("+1");
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(content).toContain("#7");
+		expect(watchTargets).toEqual([jjHeads, targetA, jjHeads, targetB]);
+		component.dispose();
+	});
 });
