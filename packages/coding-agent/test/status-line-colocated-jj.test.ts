@@ -781,4 +781,74 @@ describe("StatusLineComponent display detector", () => {
 		expect(component.getTopBorder(80).content).toContain("#8");
 		component.dispose();
 	});
+
+	it("retries operational re-discovery after a rebind failure", async () => {
+		const root = "/repo/refresh-retry";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const repoA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const repoB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("branch-b")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		let failRepo = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
+		const repoSpy = vi.spyOn(vcs, "repo");
+		repoSpy.mockImplementation(() => {
+			if (failRepo) throw new Error("no repo");
+			return moved ? repoB : repoA;
+		});
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? repoB : repoA));
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).not.toContain("branch-b");
+		expect(run).not.toHaveBeenCalled();
+
+		// The target moves but operational re-discovery throws: the display
+		// recovers while PR state stays on the stale handle.
+		moved = true;
+		failRepo = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("branch-b");
+		expect(run).not.toHaveBeenCalled();
+		const callsAfterFailure = repoSpy.mock.calls.length;
+
+		// Same target, no storm: renders inside the window do not retry.
+		component.getTopBorder(80);
+		expect(repoSpy.mock.calls.length).toBe(callsAfterFailure);
+
+		// Past the window with the failure cleared, the same target retries
+		// through the accessor and the lookup follows the new branch.
+		failRepo = false;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(component.getTopBorder(80).content).toContain("#7");
+		component.dispose();
+	});
 });

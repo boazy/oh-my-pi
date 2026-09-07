@@ -244,6 +244,8 @@ interface ActiveRepoCache {
 	displayRepository: VcsRepo | null;
 	displayRepositoryCheckedAt: number;
 	repositoryCheckedAt: number;
+	/** Operational re-discovery failed mid-rebind; retry through the accessor. */
+	operationalRefreshNeeded: boolean;
 	/** Project + worktree dir name when `projectDir` is a linked worktree, else null. */
 	worktree: WorktreeContext | null;
 }
@@ -426,6 +428,7 @@ export class StatusLineComponent implements Component {
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
 	#cachedBranchCwd: string | undefined = undefined;
+	#cachedBranchTarget: string | null | undefined = undefined;
 	// In-flight reftable resolve slot. Ownership is the launch id, not the cwd:
 	// two live resolves can share a cwd string across an invalidation, and a
 	// stale one must never free (or poison) a slot it no longer owns.
@@ -624,17 +627,24 @@ export class StatusLineComponent implements Component {
 			displayRepository,
 			displayRepositoryCheckedAt: Date.now(),
 			repositoryCheckedAt: Date.now(),
+			operationalRefreshNeeded: false,
 			worktree,
 		};
 		return this.#activeRepoCache;
 	}
 
 	#resolveRepository(cache: ActiveRepoCache): VcsRepo | null {
-		if (cache.repository) return cache.repository;
+		if (cache.repository && !cache.operationalRefreshNeeded) return cache.repository;
 		const now = Date.now();
-		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
-		cache.repository = vcs.repo(cache.effectiveGitCwd);
-		cache.repositoryCheckedAt = now;
+		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return cache.repository;
+		try {
+			cache.repository = vcs.repo(cache.effectiveGitCwd);
+			cache.repositoryCheckedAt = now;
+			cache.operationalRefreshNeeded = false;
+		} catch {
+			// Keep the stale handle (or null); the next window retries.
+			cache.repositoryCheckedAt = now;
+		}
 		return cache.repository;
 	}
 
@@ -678,8 +688,10 @@ export class StatusLineComponent implements Component {
 			try {
 				cache.repository = vcs.repo(cache.effectiveGitCwd);
 				cache.repositoryCheckedAt = now;
+				cache.operationalRefreshNeeded = false;
 			} catch {
-				// Keep the stale handle; the next change retries.
+				// Keep the stale handle; the accessor retries it on a cadence.
+				cache.operationalRefreshNeeded = true;
 			}
 			this.#defaultBranch = undefined;
 			this.#defaultBranchCwd = undefined;
@@ -1125,6 +1137,7 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
+		this.#cachedBranchTarget = undefined;
 		// Abort before releasing the in-flight slot. Releasing alone would allow
 		// repeated invalidations to fan out still-running git subprocesses.
 		this.#branchResolveActive?.controller.abort();
@@ -1209,10 +1222,19 @@ export class StatusLineComponent implements Component {
 			})();
 			return this.#cachedJjBranch;
 		}
+		// The branch cache is keyed by watch target as well as cwd: display
+		// and operational reads can resolve different repos for one cwd
+		// after a redirect, and must never serve each other's labels.
+		const branchTarget = displayWatchTarget(repository);
 		const fallbackCacheExpired =
 			this.#gitWatcherUnavailable &&
 			(this.#branchLastFetch === undefined || Date.now() - this.#branchLastFetch >= WATCHER_FAILURE_POLL_TTL_MS);
-		if (this.#cachedBranch !== undefined && this.#cachedBranchCwd === gitCwd && !fallbackCacheExpired) {
+		if (
+			this.#cachedBranch !== undefined &&
+			this.#cachedBranchCwd === gitCwd &&
+			this.#cachedBranchTarget === branchTarget &&
+			!fallbackCacheExpired
+		) {
 			return this.#cachedBranch;
 		}
 
@@ -1224,7 +1246,9 @@ export class StatusLineComponent implements Component {
 		const repoInfo = vcs.gitInfo(gitCwd);
 		if (repoInfo?.isReftable) {
 			if (this.#branchResolveActive !== undefined) {
-				return this.#branchResolveActive.cwd === gitCwd && this.#cachedBranchCwd === gitCwd
+				return this.#branchResolveActive.cwd === gitCwd &&
+					this.#cachedBranchCwd === gitCwd &&
+					this.#cachedBranchTarget === branchTarget
 					? (this.#cachedBranch ?? null)
 					: null;
 			}
@@ -1263,6 +1287,7 @@ export class StatusLineComponent implements Component {
 				const prev = this.#cachedBranchCwd === gitCwd ? this.#cachedBranch : undefined;
 				this.#cachedBranchCwd = gitCwd;
 				this.#cachedBranchRepoId = repoId;
+				this.#cachedBranchTarget = branchTarget;
 				this.#cachedBranch = next;
 				this.#branchLastFetch = Date.now();
 				if (prev !== next && this.#onBranchChange) this.#onBranchChange();
@@ -1281,6 +1306,7 @@ export class StatusLineComponent implements Component {
 		const gitHeadPath = repoInfo?.headPath ?? null;
 		this.#cachedBranchCwd = gitCwd;
 		this.#cachedBranchRepoId = gitHeadPath;
+		this.#cachedBranchTarget = branchTarget;
 		this.#branchLastFetch = Date.now();
 		if (!head) {
 			this.#cachedBranch = null;
@@ -2037,6 +2063,7 @@ export class StatusLineComponent implements Component {
 					displayRepository: null,
 					displayRepositoryCheckedAt: Date.now(),
 					repositoryCheckedAt: Date.now(),
+					operationalRefreshNeeded: false,
 					worktree: null,
 				};
 		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache) : null;
