@@ -11,9 +11,9 @@
  * a jj bookmark/change id must never become a GitHub head.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
@@ -448,9 +448,9 @@ describe("StatusLineComponent display detector", () => {
 	});
 
 	it("falls back to re-discovery when the jj workspace vanishes", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-jj-vanish-"));
-		const heads = join(dir, ".jj", "repo", "op_heads", "heads");
-		mkdirSync(heads, { recursive: true });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-vanish-"));
+		const heads = path.join(dir, ".jj", "repo", "op_heads", "heads");
+		fs.mkdirSync(heads, { recursive: true });
 		try {
 			const operational = operationalGit(dir, headFor("main"));
 			const jjGone = displayJj(dir, async () => "gone-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
@@ -471,7 +471,7 @@ describe("StatusLineComponent display detector", () => {
 
 			// The workspace vanishes; past the cadence the display falls
 			// back to re-discovery and the git branch returns.
-			rmSync(join(dir, ".jj"), { recursive: true, force: true });
+			fs.rmSync(path.join(dir, ".jj"), { recursive: true, force: true });
 			now += 6_000;
 			component.getTopBorder(80);
 			await flush();
@@ -479,14 +479,14 @@ describe("StatusLineComponent display detector", () => {
 			expect(component.getTopBorder(80).content).not.toContain("gone-bookmark");
 			component.dispose();
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("keeps a live jj workspace without re-discovery walks", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-jj-alive-"));
-		const heads = join(dir, ".jj", "repo", "op_heads", "heads");
-		mkdirSync(heads, { recursive: true });
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-jj-alive-"));
+		const heads = path.join(dir, ".jj", "repo", "op_heads", "heads");
+		fs.mkdirSync(heads, { recursive: true });
 		try {
 			const operational = operationalGit(dir, headFor("main"));
 			const display = displayJj(dir, async () => "steady-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
@@ -515,7 +515,42 @@ describe("StatusLineComponent display detector", () => {
 			expect(component.getTopBorder(80).content).toContain("steady-bookmark");
 			component.dispose();
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("installs one watcher pair when setup re-enters on a backend change", async () => {
+		const root = "/repo/reentrant-setup";
+		const operational = operationalGit(root, headFor("main"));
+		const gitDisplay = operationalGit(root, headFor("main"));
+		const jjDisplay = displayJj(root, async () => "reentrant-bookmark", { staged: 0, unstaged: 0, untracked: 0 });
+		mockRepos(operational, gitDisplay, root);
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const movedAt = now + 6_000;
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (now >= movedAt ? jjDisplay : gitDisplay));
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("main");
+
+		// Past the cadence the detector observes colocation; re-running
+		// setup re-enters it through revalidation, and the guard leaves a
+		// single pair installed instead of leaking a duplicate.
+		now = movedAt;
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(component.getTopBorder(80).content).toContain("reentrant-bookmark");
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`, `${root}/.git/HEAD`]);
+		component.dispose();
 	});
 });

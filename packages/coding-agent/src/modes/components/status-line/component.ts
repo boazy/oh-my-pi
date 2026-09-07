@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -285,7 +285,7 @@ function displayWatchTarget(repository: VcsRepo | null): string | null {
  */
 function displayWatchTargetAlive(repository: VcsRepo): boolean {
 	try {
-		return existsSync(repository.watchTarget());
+		return fs.existsSync(repository.watchTarget());
 	} catch {
 		return false;
 	}
@@ -422,6 +422,11 @@ export class StatusLineComponent implements Component {
 	#branchCacheGeneration = 0;
 
 	#gitUnwatch: (() => void) | null = null;
+
+	// Reentrancy guard: display revalidation inside this setup can re-enter
+	// here on a backend change; the outer call installs the fresh pair as it
+	// continues, so the nested call is a no-op.
+	#setupGitWatcherActive = false;
 	// Operational-git head watcher, installed only when the display backend
 	// differs (colocated jj): a direct `git switch` moves .git/HEAD without
 	// touching jj op heads, so the display watcher alone cannot invalidate
@@ -848,6 +853,16 @@ export class StatusLineComponent implements Component {
 	}
 
 	#setupGitWatcher(): void {
+		if (this.#setupGitWatcherActive) return;
+		this.#setupGitWatcherActive = true;
+		try {
+			this.#setupGitWatcherInner();
+		} finally {
+			this.#setupGitWatcherActive = false;
+		}
+	}
+
+	#setupGitWatcherInner(): void {
 		this.#retireGitWatcher();
 		this.#gitWatcherUnavailable = false;
 
