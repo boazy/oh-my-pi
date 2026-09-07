@@ -177,10 +177,13 @@ describe("StatusLineComponent jj label fallback", () => {
 		}
 	});
 
-	it("does not retire the handle on abort/timeout rejections", async () => {
+	it("does not retire the handle on native cancellation", async () => {
+		// The binding's actual timeout shape: repo_blocking rejects with
+		// { name: "VcsError", code: "Canceled" } when the signal fires
+		// before the native task begins — not a DOM TimeoutError.
 		const label = vi
 			.fn<() => Promise<string | null>>()
-			.mockRejectedValue(Object.assign(new Error("slow store"), { name: "TimeoutError" }));
+			.mockRejectedValue(Object.assign(new Error("operation canceled"), { name: "VcsError", code: "Canceled" }));
 		mockBackends(label);
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);

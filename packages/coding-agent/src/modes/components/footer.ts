@@ -8,7 +8,7 @@ import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
-import { sanitizeStatusText } from "../shared";
+import { isTransientVcsError, sanitizeStatusText } from "../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
 
 /** Minimum interval between display-backend syncs (re-discovery walks). */
@@ -261,8 +261,14 @@ export class FooterComponent implements Component {
 				this.#cachedBranch = clean;
 				if (changed) this.#onBranchChange?.();
 			})
-			.catch(() => {
+			.catch((error: unknown) => {
 				if (this.#disposed || this.#branchGeneration !== generation) return;
+				// Transient cancellations keep today's sticky null rather
+				// than failing over: the store may merely be slow.
+				if (isTransientVcsError(error)) {
+					this.#cachedBranch = null;
+					return;
+				}
 				const fallback = this.#gitFallback(repository);
 				const changed = this.#cachedBranch !== fallback.branch;
 				this.#cachedBranch = fallback.branch;

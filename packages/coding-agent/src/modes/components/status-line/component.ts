@@ -26,7 +26,7 @@ import { withTimeoutSignal } from "../../../utils/fetch-timeout";
 import { GH_COMMAND_TIMEOUT_MS, github } from "../../../utils/github";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
-import { sanitizeStatusText } from "../../shared";
+import { isTransientVcsError, sanitizeStatusText } from "../../shared";
 import { theme } from "../../theme/theme";
 import { type CompactionBoundaries, computeCompactionBoundaries } from "../../utils/context-usage";
 import {
@@ -1287,8 +1287,7 @@ export class StatusLineComponent implements Component {
 	 */
 	#jjLabelLoadFailed(activeRepoCache: ActiveRepoCache, repository: VcsRepo, generation: number, error: unknown): void {
 		if (this.#disposed || this.#jjCacheGeneration !== generation) return;
-		const name = (error as { name?: unknown } | null)?.name;
-		if (name === "AbortError" || name === "TimeoutError") return;
+		if (isTransientVcsError(error)) return;
 		const target = displayWatchTarget(repository);
 		if (target === null || !this.#colocatedGitRepo(activeRepoCache, repository)) return;
 		if (this.#jjLabelFailedTarget === target) {

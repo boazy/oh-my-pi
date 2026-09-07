@@ -32,3 +32,20 @@ export function getTabBarTheme(): TabBarTheme {
 }
 
 export { parseCommandArgs } from "../utils/command-args";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VCS Errors
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Whether a VCS binding rejection is a transient cancellation rather than a
+ * genuine backend failure. The native `repo_blocking` wrapper checks the
+ * abort/timeout signal before the task begins and rejects with
+ * `{ name: "VcsError", code: "Canceled" }`; DOM `AbortError`/`TimeoutError`
+ * cover non-native paths. Callers use this to choose retry-later (throttled
+ * null) over fail-over (fallback presentation).
+ */
+export function isTransientVcsError(error: unknown): boolean {
+	const details = error as { name?: unknown; code?: unknown } | null | undefined;
+	return details?.name === "AbortError" || details?.name === "TimeoutError" || details?.code === "Canceled";
+}

@@ -271,4 +271,30 @@ describe("FooterComponent jj label fallback", () => {
 			component.dispose();
 		}
 	});
+	it("keeps null on native cancellation instead of failing over", async () => {
+		const root = "/repo/footer-fallback-transient";
+		const label = vi
+			.fn<() => Promise<string | null>>()
+			.mockRejectedValue(Object.assign(new Error("operation canceled"), { name: "VcsError", code: "Canceled" }));
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
+		vi.spyOn(vcs, "repo").mockReturnValue(gitRepo(root, "feature/f"));
+		const watchKinds: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchKinds.push(repo.kind());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		try {
+			component.render(80);
+			await flush();
+			// A mere timeout must not fail over to git: sticky null, and
+			// no fallback watcher installed.
+			expect(component.render(80).join("\n")).not.toContain("(feature/f)");
+			expect(watchKinds).toEqual(["jj"]);
+		} finally {
+			component.dispose();
+		}
+	});
 });
