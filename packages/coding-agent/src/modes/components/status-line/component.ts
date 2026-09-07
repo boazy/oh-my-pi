@@ -666,9 +666,19 @@ export class StatusLineComponent implements Component {
 		const now = Date.now();
 		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return cache.repository;
 		try {
+			const prevTarget = displayWatchTarget(cache.repository);
 			cache.repository = vcs.repo(cache.effectiveGitCwd);
 			cache.repositoryCheckedAt = now;
 			cache.operationalRefreshNeeded = false;
+			if (prevTarget !== displayWatchTarget(cache.repository)) {
+				// Operational identity changed outside a display rebind:
+				// drop default-branch state so a stale in-flight lookup
+				// cannot repopulate it.
+			this.#defaultBranch = undefined;
+			this.#defaultBranchCwd = undefined;
+			this.#defaultBranchRepoId = undefined;
+			this.#defaultBranchGeneration++;
+			}
 		} catch {
 			// Keep the stale handle (or null); the next window retries.
 			cache.repositoryCheckedAt = now;
@@ -1364,10 +1374,11 @@ export class StatusLineComponent implements Component {
 		if (this.#defaultBranch === undefined) {
 			this.#defaultBranch = "main";
 			const lookupCwd = effectiveGitCwd;
+			const lookupRepoId = repoId;
 			const generation = this.#defaultBranchGeneration;
 			(async () => {
 				const resolved = await vcs.git(lookupCwd)?.defaultBranch();
-				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd || this.#defaultBranchGeneration !== generation) return;
+				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd || this.#defaultBranchRepoId !== lookupRepoId || this.#defaultBranchGeneration !== generation) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
 					if (this.#onBranchChange) {

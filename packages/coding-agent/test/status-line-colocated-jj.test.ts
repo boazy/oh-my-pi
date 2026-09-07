@@ -957,4 +957,81 @@ describe("StatusLineComponent display detector", () => {
 			fs.rmSync(outer, { recursive: true, force: true });
 		}
 	});
+
+	it("drops a stale lookup when delayed discovery swaps the repo", async () => {
+		const root = "/repo/retarget-swapbump";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const repoA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("feature")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		const repoB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("branch-b")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		let failRepo = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		const staleOne = Promise.withResolvers<string | null>();
+		const staleTwo = Promise.withResolvers<string | null>();
+		const freshThree = Promise.withResolvers<string | null>();
+		let defaultCalls = 0;
+		vi.spyOn(vcs, "git").mockImplementation(
+			(() => ({
+				defaultBranch: () => {
+					defaultCalls++;
+					return defaultCalls === 1 ? staleOne.promise : defaultCalls === 2 ? staleTwo.promise : freshThree.promise;
+				},
+				linkedWorktree: () => null,
+			}) as unknown as VcsGitRepo),
+		);
+		vi.spyOn(vcs, "repo").mockImplementation(() => {
+			if (failRepo) throw new Error("no repo");
+			return moved ? repoB : repoA;
+		});
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? repoB : repoA));
+		const run = vi
+			.spyOn(github, "run")
+			.mockResolvedValueOnce({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" })
+			.mockResolvedValue({ exitCode: 0, stdout: '{"number":8,"url":"https://example.test/x/8"}', stderr: "" });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitPrSegments);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(1);
+
+		// Move with a failing refresh (stale handle kept, retry flagged),
+		// then recover through the accessor: the swap bumps past the
+		// second lookup, which must never commit even though it resolves.
+		moved = true;
+		failRepo = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		failRepo = false;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		staleOne.resolve("main");
+		staleTwo.resolve("branch-b");
+		await flush();
+		component.getTopBorder(80);
+		await flush();
+		expect(run).toHaveBeenCalledTimes(3);
+		expect(component.getTopBorder(80).content).toContain("#8");
+		component.dispose();
+	});
 });
