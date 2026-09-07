@@ -308,10 +308,12 @@ function displayTargetAlive(repository: VcsRepo): boolean {
 }
 
 /**
- * Whether a `.git` entry appeared on the path from `cwd` up to (excluding)
- * `jjRoot` since discovery: a nested git checkout takes precedence for
- * dirs inside it, so the display must re-resolve. Bounded to the nesting
- * depth — no full repository walk. Anything unexpected means keep caching.
+ * Whether a git checkout rooted strictly below `jjRoot` now contains `cwd`:
+ * nested checkouts take precedence for dirs inside them, so the display must
+ * re-resolve. Each level reuses the central detector (marker validity matches
+ * discovery exactly), bounded to the nesting depth. Root comparison is
+ * lexical; symlinked layouts conservatively keep caching, as does anything
+ * unexpected.
  */
 function nestedGitAppeared(cwd: string, jjRoot: string): boolean {
 	try {
@@ -320,11 +322,14 @@ function nestedGitAppeared(cwd: string, jjRoot: string): boolean {
 		for (;;) {
 			if (dir === stop) return false;
 			if (!dir.startsWith(stop + path.sep)) return false;
+			// Reuse the central detector per level instead of stat-ing `.git`
+			// directly, so marker validity matches discovery exactly and the
+			// two cannot drift. Root comparison is lexical; symlinked layouts
+			// conservatively keep caching.
 			try {
-				fs.statSync(path.join(dir, ".git"));
-				return true;
+				if (vcs.git(dir)?.info().repoRoot === dir) return true;
 			} catch {
-				// Absent at this level; keep climbing.
+				// Unreadable level; keep climbing.
 			}
 			const parent = path.dirname(dir);
 			if (parent === dir) return false;
@@ -545,7 +550,10 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
-	#gitStatusInFlightCwd: string | undefined = undefined;
+	// In-flight git status request: object identity (not cwd) owns the slot,
+	// so a superseded completion can neither publish nor release another
+	// request's state. Mirrors the reftable/jj request-id pattern.
+	#gitStatusInFlight: { cwd: string } | undefined = undefined;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
@@ -746,6 +754,14 @@ export class StatusLineComponent implements Component {
 			// retaining it would display it indefinitely. Generic activity
 			// invalidation deliberately keeps stale-visible until resolved.
 			this.#cachedPr = null;
+			// Git status requests/cache are keyed by cwd alone: drop them here
+			// or the old repo's pending completion publishes A's counts for B
+			// (or blocks B while hung). Ordinary HEAD moves keep the 1s-stale
+			// cache; only a target change resets.
+			this.#gitStatusInFlight = undefined;
+			this.#cachedGitStatus = null;
+			this.#cachedGitStatusCwd = undefined;
+			this.#gitStatusLastFetch = 0;
 			this.invalidateGitCaches();
 		}
 		return cache.displayRepository;
@@ -1440,14 +1456,15 @@ export class StatusLineComponent implements Component {
 			return this.#cachedJjStatus;
 		}
 
-		if (this.#gitStatusInFlightCwd !== undefined) {
+		if (this.#gitStatusInFlight) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
 		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < 1000) {
 			return this.#cachedGitStatus;
 		}
 
-		this.#gitStatusInFlightCwd = gitCwd;
+		const statusRequest = { cwd: gitCwd };
+		this.#gitStatusInFlight = statusRequest;
 
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
@@ -1456,19 +1473,18 @@ export class StatusLineComponent implements Component {
 			} catch {
 				nextStatus = null;
 			} finally {
-				if (this.#gitStatusInFlightCwd === gitCwd) {
+				if (this.#gitStatusInFlight === statusRequest) {
 					const prev = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 					this.#cachedGitStatus = nextStatus;
 					this.#cachedGitStatusCwd = gitCwd;
 					this.#gitStatusLastFetch = Date.now();
-					this.#gitStatusInFlightCwd = undefined;
+					this.#gitStatusInFlight = undefined;
 					if (!this.#disposed && this.#onBranchChange && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
 						this.#onBranchChange();
 					}
 				}
 			}
 		})();
-
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 

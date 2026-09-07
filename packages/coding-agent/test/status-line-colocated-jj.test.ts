@@ -934,6 +934,10 @@ describe("StatusLineComponent display detector", () => {
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 			let nested = false;
 			vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (nested ? nestedGit : jjLive));
+			// The probe reuses central discovery per level: only the new
+			// nested checkout validates.
+			const gitAtSub = { info: () => ({ repoRoot: sub }) } as unknown as VcsGitRepo;
+			vi.spyOn(vcs, "git").mockImplementation(((dir: string) => (dir === sub && nested ? gitAtSub : null)) as unknown as typeof vcs.git);
 
 			const component = new StatusLineComponent(makeSession());
 			component.updateSettings(gitSegment);
@@ -1032,6 +1036,61 @@ describe("StatusLineComponent display detector", () => {
 		await flush();
 		expect(run).toHaveBeenCalledTimes(3);
 		expect(component.getTopBorder(80).content).toContain("#8");
+		component.dispose();
+	});
+
+	it("drops a pending status fetch when the target moves", async () => {
+		const root = "/repo/status-redirect";
+		const targetA = `${root}/.git-a/HEAD`;
+		const targetB = `${root}/.git-b/HEAD`;
+		const oldStatus = Promise.withResolvers<GitStatus | null>();
+		const dispA = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetA,
+			statusSummary: () => oldStatus.promise,
+		} as unknown as VcsRepo;
+		const dispB = {
+			kind: () => "git",
+			asGit: () => gitHandle(headFor("main")),
+			asJj: () => null,
+			root: () => root,
+			watchTarget: () => targetB,
+			statusSummary: async (): Promise<GitStatus | null> => ({ staged: 1, unstaged: 2, untracked: 3 }),
+		} as unknown as VcsRepo;
+		let moved = false;
+		vi.spyOn(vcs, "gitInfo").mockReturnValue(repoInfoFor(root));
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockReturnValue(dispA);
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (moved ? dispB : dispA));
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+		component.watchBranch(() => {});
+		component.getTopBorder(80);
+		await flush();
+
+		// Move past the cadence with A's fetch still pending: B launches
+		// immediately instead of waiting on it.
+		moved = true;
+		now += 6_000;
+		component.getTopBorder(80);
+		await flush();
+		let content = component.getTopBorder(80).content;
+		expect(content).toContain("*2");
+		expect(content).not.toContain("*9");
+
+		// The stale completion lands late and must neither publish nor
+		// release the new request's slot.
+		oldStatus.resolve({ staged: 9, unstaged: 9, untracked: 9 });
+		await flush();
+		content = component.getTopBorder(80).content;
+		expect(content).toContain("*2");
+		expect(content).not.toContain("*9");
 		component.dispose();
 	});
 });
