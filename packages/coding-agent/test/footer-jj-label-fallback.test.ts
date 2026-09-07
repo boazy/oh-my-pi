@@ -228,4 +228,47 @@ describe("FooterComponent jj label fallback", () => {
 			component.dispose();
 		}
 	});
+	it("re-probes and recovers when the fallback watcher install throws", async () => {
+		const root = "/repo/footer-fallback-watch-throw";
+		const label = vi.fn<() => Promise<string | null>>().mockRejectedValue(new Error("store gone"));
+		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(corruptJj(root, label));
+		vi.spyOn(vcs, "repo").mockReturnValue(gitRepo(root, "feature/f"));
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			// The git fallback target cannot be watched here, but the
+			// jj display target can: fallback must not depend on the
+			// install succeeding.
+			if (repo.kind() === "git") throw new Error("no watch");
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		try {
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+			expect(watchTargets).toEqual([`${root}/.jj/repo/op_heads/heads`]);
+
+			// Past the cadence the jj re-probe runs even though no git
+			// watcher could be installed.
+			now += 6_000;
+			component.render(80);
+			await flush();
+			expect(label).toHaveBeenCalledTimes(2);
+			expect(component.render(80).join("\n")).toContain("(feature/f)");
+
+			// A repaired store still recovers.
+			label.mockResolvedValue("fixed-j");
+			now += 6_000;
+			component.render(80);
+			await flush();
+			expect(component.render(80).join("\n")).toContain("(fixed-j)");
+		} finally {
+			component.dispose();
+		}
+	});
 });

@@ -33,6 +33,11 @@ export class FooterComponent implements Component {
 	// the jj target, preserving repair detection through the label path.
 	#fallbackUnwatch: (() => void) | null = null;
 	#fallbackWatchedTarget: string | null = null;
+	// Operational git repo the cached branch falls back to (null when no
+	// fallback is active). Recorded independently of watcher success so a
+	// failed watcher install neither loses the fallback nor disables its
+	// re-probe; the watcher itself stays optional coverage.
+	#fallbackRepo: VcsRepo | null = null;
 
 	// Last display-backend sync, bounding re-discovery walks past the
 	// initial setup.
@@ -126,10 +131,17 @@ export class FooterComponent implements Component {
 		}
 		if (target === this.#watchedTarget && this.#gitUnwatch) {
 			// A cached fallback never re-issues the label on its own, so a
-			// repaired store would stick on git forever: re-probe jj here,
-			// bounded by this TTL plus the in-flight guard. A still-broken
-			// store fails silently back into the same fallback.
-			if (this.#fallbackWatchedTarget !== null && !repository.asGit()) this.#requestJjLabel(repository);
+			// repaired store would stick on git forever: retry both recovery
+			// paths on this cadence — the jj re-probe (repair detection)
+			// and the git watcher install (a previous install may have
+			// thrown). Each is self-guarding: the probe needs no in-flight
+			// load, the install is skipped while its target is already
+			// watched, and a still-broken store fails silently back into
+			// the same fallback.
+			if (this.#fallbackRepo !== null && !repository.asGit()) {
+				this.#requestJjLabel(repository);
+				this.#watchFallback(this.#fallbackRepo);
+			}
 			return;
 		}
 		// Install before disposing: a failed replacement keeps existing
@@ -143,6 +155,7 @@ export class FooterComponent implements Component {
 			this.#gitUnwatch = unwatch;
 			this.#watchedTarget = target;
 			this.#releaseFallbackWatch();
+			this.#fallbackRepo = null;
 		} catch {
 			// Silently fail if we can't watch; the next TTL window retries.
 		}
@@ -158,6 +171,7 @@ export class FooterComponent implements Component {
 		this.#branchResolve = undefined;
 		this.#gitUnwatch?.();
 		this.#gitUnwatch = null;
+		this.#fallbackRepo = null;
 		this.#releaseFallbackWatch();
 	}
 
@@ -241,6 +255,7 @@ export class FooterComponent implements Component {
 			.then(label => {
 				if (this.#disposed || this.#branchGeneration !== generation) return;
 				this.#releaseFallbackWatch();
+				this.#fallbackRepo = null;
 				const clean = typeof label === "string" ? sanitizeStatusText(label) : label;
 				const changed = this.#cachedBranch !== clean;
 				this.#cachedBranch = clean;
@@ -251,6 +266,7 @@ export class FooterComponent implements Component {
 				const fallback = this.#gitFallback(repository);
 				const changed = this.#cachedBranch !== fallback.branch;
 				this.#cachedBranch = fallback.branch;
+				this.#fallbackRepo = fallback.repo;
 				this.#watchFallback(fallback.repo);
 				if (changed) this.#onBranchChange?.();
 			})

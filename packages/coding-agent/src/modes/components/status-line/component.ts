@@ -720,14 +720,32 @@ export class StatusLineComponent implements Component {
 		}
 		const prevTarget = displayWatchTarget(cache.displayRepository);
 		let display: VcsRepo | null;
+		let discoveryFailed = false;
 		try {
 			display = vcs.repoForDisplay(cache.effectiveGitCwd);
 		} catch {
 			display = null;
+			discoveryFailed = true;
 		}
-		cache.displayRepository = display ?? cache.repository;
+		if (display) {
+			cache.displayRepository = display;
+		} else if (discoveryFailed || !cache.displayRepository) {
+			// Discovery threw (transient I/O), or this is the first
+			// resolution: keep the stale handle, falling back to
+			// operational. A transient failure must not read as removal.
+			cache.displayRepository ??= cache.repository;
+		} else {
+			// Authoritative null rediscovery: confirm through the operational
+			// detector before dropping the stale handle. A lone display blip
+			// while operational still resolves (racing mutation, skewed
+			// detectors) keeps today's behavior; only agreement means
+			// removal, and the target change below then invalidates caches
+			// and rebuilds watchers.
+			this.#refreshOperational(cache);
+			if (!cache.repository) cache.displayRepository = null;
+		}
 		cache.displayRepositoryCheckedAt = now;
-		if (cache.displayRepository && prevTarget !== displayWatchTarget(cache.displayRepository)) {
+		if ((cache.displayRepository || prevTarget) && prevTarget !== displayWatchTarget(cache.displayRepository)) {
 			// The backend or head target changed (late colocation,
 			// late-appearing repo, redirected `.git`): refresh the operational
 			// handle too — it snapshots git_dir/head_path at discovery — then
