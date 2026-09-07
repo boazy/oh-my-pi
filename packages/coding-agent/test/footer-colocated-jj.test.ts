@@ -176,4 +176,50 @@ describe("FooterComponent display detector", () => {
 		expect(watchTargets).toEqual([`${root}/.git/HEAD`, `${root}/.jj/repo/op_heads/heads`]);
 		component.dispose();
 	});
+
+	it("clears the branch and watcher when discovery finds no repository", async () => {
+		const root = "/repo/footer-vanish";
+		const jjHeads = `${root}/.jj/repo/op_heads/heads`;
+		const jj = jjDisplay(root, async () => "gone-bookmark");
+		const git = gitDisplay(root, "main");
+		let mode: "git" | "jj" | "none" = "git";
+		vi.spyOn(vcs, "repoForDisplay").mockImplementation(() => (mode === "git" ? git : mode === "jj" ? jj : null));
+		const watchTargets: string[] = [];
+		vi.spyOn(vcs, "watch").mockImplementation(((repo: VcsRepo) => {
+			watchTargets.push(repo.watchTarget());
+			return () => {};
+		}) as unknown as typeof vcs.watch);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new FooterComponent(makeSession());
+		component.watchBranch(() => {});
+		expect(component.render(80).join("\n")).toContain("(main)");
+
+		// Become colocated, then vanish entirely: the bookmark must go
+		// away rather than linger with dead coverage.
+		mode = "jj";
+		now += 6_000;
+		component.render(80);
+		await flush();
+		expect(component.render(80).join("\n")).toContain("(gone-bookmark)");
+		mode = "none";
+		now += 6_000;
+		component.render(80);
+		await flush();
+		let content = component.render(80).join("\n");
+		expect(content).not.toContain("(gone-bookmark)");
+		expect(content).not.toContain("(main)");
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, jjHeads]);
+
+		// Reappearing re-installs from a clean slate.
+		mode = "jj";
+		now += 6_000;
+		component.render(80);
+		await flush();
+		content = component.render(80).join("\n");
+		expect(content).toContain("(gone-bookmark)");
+		expect(watchTargets).toEqual([`${root}/.git/HEAD`, jjHeads, jjHeads]);
+		component.dispose();
+	});
 });

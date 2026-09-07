@@ -100,7 +100,17 @@ export class FooterComponent implements Component {
 		} catch {
 			return;
 		}
-		if (!repository) return;
+		if (!repository) {
+			// No repository: drop stale branch/watcher state rather than
+			// retaining the previous backend's label and coverage.
+			if (this.#cachedBranch !== undefined || this.#gitUnwatch || this.#branchResolve) {
+				this.#gitUnwatch?.();
+				this.#gitUnwatch = null;
+				this.#watchedTarget = null;
+				this.#invalidateBranch();
+			}
+			return;
+		}
 		let target: string | null;
 		try {
 			target = repository.watchTarget();
