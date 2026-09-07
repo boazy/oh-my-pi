@@ -562,6 +562,11 @@ export class StatusLineComponent implements Component {
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
 	#cachedPrContext: PrCacheContext | undefined = undefined;
 	#prLookupInFlight = false;
+	// Generation of the in-flight PR lookup's repository. Bumped on every
+	// repository-target change so a superseded lookup can neither block the
+	// new repository's slot nor commit its result. Mirrors
+	// #defaultBranchGeneration / #branchCacheGeneration.
+	#prLookupGeneration = 0;
 	#defaultBranch?: string;
 	#defaultBranchCwd: string | undefined = undefined;
 	#defaultBranchRepoId: string | null | undefined = undefined;
@@ -757,9 +762,16 @@ export class StatusLineComponent implements Component {
 		this.#defaultBranchCwd = undefined;
 		this.#defaultBranchRepoId = undefined;
 		this.#defaultBranchGeneration++;
+		this.#prLookupGeneration++;
 		this.#setupGitWatcher();
 		this.invalidateGitCaches();
 		this.#cachedPr = null;
+		// Retire a superseded lookup's slot: its `github.run` may stay pending
+		// up to GH_COMMAND_TIMEOUT_MS, and the new repository must start its
+		// own lookup immediately. The stale completion is dropped by the
+		// generation check in `#lookupPr`, and its finally-block no longer
+		// clears a slot it no longer owns.
+		this.#prLookupInFlight = false;
 		this.#gitStatusInFlight = undefined;
 		this.#cachedGitStatus = null;
 		this.#cachedGitStatusCwd = undefined;
@@ -1517,6 +1529,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		this.#prLookupInFlight = true;
+		const lookupGeneration = this.#prLookupGeneration;
 		const lookupContext = currentContext;
 		const lookupCwd = gitCwd;
 
@@ -1524,6 +1537,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
+				if (lookupGeneration !== this.#prLookupGeneration) return;
 				const latestActiveRepoCache = this.#resolveActiveRepoCache();
 				if (latestActiveRepoCache.effectiveGitCwd !== lookupCwd) return;
 				const latestBranch = this.#getBranchLabel(
@@ -1564,7 +1578,7 @@ export class StatusLineComponent implements Component {
 				if (this.#disposed) return;
 				setCachedPr(null);
 			} finally {
-				this.#prLookupInFlight = false;
+				if (this.#prLookupGeneration === lookupGeneration) this.#prLookupInFlight = false;
 				if (!this.#disposed && this.#onBranchChange) {
 					this.#onBranchChange();
 				}
